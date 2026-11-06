@@ -1,0 +1,15 @@
+# Build output
+/target
+
+# Generated, but committed on purpose: gui/src/main.rs embeds it with
+# include_bytes!, so a clone must be able to build without ImageMagick
+# installed. install.sh regenerates it from assets/voice-clipper.png when
+# magick is available; the committed copy is the fallback.
+# Regenerate by hand with:
+#   magick -background none assets/voice-clipper.png -resize 64x64 -depth 8 \
+#          rgba:gui/assets/icon.rgba
+
+# Editor and OS noise
+*.swp
+*~
+.DS_Store

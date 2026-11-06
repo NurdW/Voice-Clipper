@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# clipper-listen — start the voice listener with a usable display session.
+#
+# Why this exists: gpu-screen-recorder needs WAYLAND_DISPLAY to enumerate
+# monitors. A systemd user service starts at login, before Plasma has published
+# that variable to the user manager, so the service inherits an environment
+# without it and gsr answers "no monitors" — forever, because the listener
+# retries every 30s against an environment that never changes. Restarting the
+# service later "fixes" it, which is exactly why it worked when restarted by
+# hand and never worked after a reboot.
+#
+# Hard-coding WAYLAND_DISPLAY=wayland-1 would be wrong: the number changes
+# between sessions (this machine has used both wayland-0 and wayland-1). So
+# resolve the live socket at start time instead.
+set -u
+
+runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+
+# Accept an inherited value only if that socket actually exists right now.
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ ! -S "$runtime/$WAYLAND_DISPLAY" ]; then
+    unset WAYLAND_DISPLAY
+fi
+
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    # Newest first, but do not trust it: this machine has had wayland-1 and
+    # wayland-2 sockets present at once, and the newer one is not necessarily the
+    # live compositor. Ask gsr which one it can actually see monitors through.
+    for socket in $(ls -1t "$runtime"/wayland-* 2>/dev/null); do
+        [ -S "$socket" ] || continue
+        candidate="${socket##*/}"
+        if WAYLAND_DISPLAY="$candidate" XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-KDE}" \
+             timeout 10 gpu-screen-recorder --list-monitors 2>/dev/null | grep -q '|'; then
+            export WAYLAND_DISPLAY="$candidate"
+            echo "clipper: no WAYLAND_DISPLAY inherited; using $WAYLAND_DISPLAY (verified)"
+            break
+        fi
+    done
+fi
+
+# gsr and the OBS websocket both want these; harmless defaults if unset.
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-KDE}"
+export DISPLAY="${DISPLAY:-:0}"
+
+# A systemd service gets a minimal PATH that does not include ~/.local/bin, so
+# `exec clipctl` fails with status 127 at boot even though it works from a
+# terminal. Resolve our own directory instead of trusting PATH.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -x "$here/clipctl" ]; then
+    exec "$here/clipctl" listen
+fi
+exec clipctl listen

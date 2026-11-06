@@ -1,0 +1,35 @@
+# clipper voice listener.
+#
+# A *user* service: it needs your PipeWire session and your KDE bus, so it must
+# run as you, not as root. Manage it with:
+#   systemctl --user {start,stop,restart,status} clipper
+#   journalctl --user -u clipper -f        # live log
+[Unit]
+Description=clipper — say a phrase, save the last N seconds of gameplay
+Documentation=file://%h/slopbot/general/clipper/docs/how-to-short-clip.md
+# PipeWire must be up, otherwise pw-record exits immediately and we restart-loop.
+After=default.target pipewire.service wireplumber.service graphical-session.target
+Wants=wireplumber.service
+# graphical-session.target is when Plasma has actually published the session
+# variables. Without this the service can start before WAYLAND_DISPLAY exists
+# and gpu-screen-recorder then reports "no monitors" until the next manual
+# restart. The wrapper script below is the belt; this ordering is the braces.
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+# Wrapper, not clipctl directly: it resolves the live Wayland session first.
+# See systemd/clipper-listen for why.
+ExecStart=%h/.local/bin/clipper-listen
+# Speech models take a few seconds; don't treat a slow start as a crash.
+# `always`, not `on-failure`: the whole point is that the listener is never not
+# running, and a clean exit is still a reason to bring it back.
+Restart=always
+RestartSec=4
+# Vosk's small model is ~50 MB resident; give it headroom without letting a leak
+# eat the whole machine.
+MemoryMax=2G
+Nice=10
+
+[Install]
+WantedBy=default.target

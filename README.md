@@ -161,3 +161,30 @@ the wake-word rule shipped instead and the behaviour is being watched.
 about twice a second. That means the GUI, `clipctl toggle`, and a keyboard
 shortcut can all flip it without any IPC, and the listener still drains the mic
 pipe while muted so PipeWire never backs up.
+
+## Versioning
+
+[Semantic versioning](https://semver.org/): `MAJOR.MINOR.PATCH`, and the number
+in `Cargo.toml` is the single source of truth (`clipctl --version` reads it).
+Tags are `v` + that number, and every tag gets a GitHub release.
+
+The **public API** being versioned is what a user or script depends on:
+
+- every `clipctl` subcommand and its flags
+- the file formats: `phrases.txt`, `gsr_audio.txt`, the state files in
+  `~/.local/state/clipper/`
+- the environment variables listed in the user guide
+
+| Bump | When | Example |
+|---|---|---|
+| **MAJOR** | Any of the above breaks. A subcommand is removed or renamed, a config file changes shape, a required env var appears. | `clipctl buffer` becomes `clipctl length` → 2.0.0 |
+| **MINOR** | New capability, nothing existing changes. New subcommand, new GUI control, new optional setting. | GSR multitrack audio → 1.1.0 |
+| **PATCH** | Bug fix only. No new surface, no behaviour change anyone has to learn. | the gsr.log panic fix → 1.0.1 |
+
+Two rules that are easy to get wrong:
+
+1. **Versions only go up.** Never reuse or lower a number; a published tag is a
+   promise.
+2. **A fix bundled with a feature is a MINOR, not a PATCH.** The feature sets the
+   bump.
+

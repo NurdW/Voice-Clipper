@@ -33,11 +33,8 @@ pub fn play() -> anyhow::Result<()> {
     let mut spawned = None;
     for player in ["pw-play", "paplay", "ffplay"] {
         let mut cmd = Command::new(player);
-        match player {
-            "ffplay" => {
-                cmd.args(["-hide_banner", "-loglevel", "error", "-nodisp", "-autoexit"]);
-            }
-            _ => {}
+        if player == "ffplay" {
+            cmd.args(["-hide_banner", "-loglevel", "error", "-nodisp", "-autoexit"]);
         }
         let result = cmd
             .arg(&path)

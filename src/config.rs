@@ -169,12 +169,11 @@ fn ini_value(text: &str, section: &str, key: &str) -> Option<String> {
         let t = line.trim();
         if t.starts_with('[') && t.ends_with(']') {
             current = t[1..t.len() - 1].to_string();
-        } else if current == section {
-            if let Some((k, v)) = t.split_once('=') {
-                if k.trim() == key {
-                    return Some(v.trim().to_string());
-                }
-            }
+        } else if current == section
+            && let Some((k, v)) = t.split_once('=')
+            && k.trim() == key
+        {
+            return Some(v.trim().to_string());
         }
     }
     None

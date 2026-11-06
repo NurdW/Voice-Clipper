@@ -134,7 +134,7 @@ fn set_buffer(seconds: Option<u32>) -> Result<()> {
 }
 
 fn human_secs(secs: u32) -> String {
-    if secs >= 60 && secs % 60 == 0 {
+    if secs >= 60 && secs.is_multiple_of(60) {
         format!("{} minute{}", secs / 60, if secs == 60 { "" } else { "s" })
     } else {
         format!("{secs} seconds")

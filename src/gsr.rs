@@ -110,12 +110,12 @@ pub fn audio_list() -> Vec<String> {
             .filter(|s| !s.is_empty())
             .collect();
     }
-    if let Some(path) = crate::config::gsr_audio_file().ok() {
-        if let Ok(txt) = fs::read_to_string(path) {
-            let v = parse_audio_list(&txt);
-            if !v.is_empty() {
-                return filter_available(v);
-            }
+    if let Ok(path) = crate::config::gsr_audio_file()
+        && let Ok(txt) = fs::read_to_string(path)
+    {
+        let v = parse_audio_list(&txt);
+        if !v.is_empty() {
+            return filter_available(v);
         }
     }
     // Nothing configured: one mixed desktop+mic track, the original behaviour.
@@ -271,10 +271,10 @@ pub fn pid() -> Option<u32> {
         if p == me {
             continue;
         }
-        if let Ok(raw) = fs::read(format!("/proc/{p}/cmdline")) {
-            if cmdline_is_gsr(&raw) {
-                return Some(p);
-            }
+        if let Ok(raw) = fs::read(format!("/proc/{p}/cmdline"))
+            && cmdline_is_gsr(&raw)
+        {
+            return Some(p);
         }
     }
     None

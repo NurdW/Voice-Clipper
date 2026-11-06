@@ -58,10 +58,10 @@ impl Obs {
         // 1. Server greets us with Hello (op 0), including salt + challenge.
         let hello = loop {
             let msg = socket.read()?;
-            if let Some(v) = json_of(&msg)? {
-                if v["op"].as_u64() == Some(0) {
-                    break v;
-                }
+            if let Some(v) = json_of(&msg)?
+                && v["op"].as_u64() == Some(0)
+            {
+                break v;
             }
         };
         let auth = &hello["d"]["authentication"];
@@ -76,7 +76,7 @@ impl Obs {
             identify["authentication"] = json!(authentication_string(password, salt, challenge));
         }
         socket.send(Message::Text(
-            json!({ "op": OP_IDENTIFY, "d": identify }).to_string().into(),
+            json!({ "op": OP_IDENTIFY, "d": identify }).to_string(),
         ))?;
 
         // 3. Wait for Identified (op 2).
@@ -102,7 +102,7 @@ impl Obs {
             d["requestData"] = data;
         }
         self.socket
-            .send(Message::Text(json!({ "op": OP_REQUEST, "d": d }).to_string().into()))?;
+            .send(Message::Text(json!({ "op": OP_REQUEST, "d": d }).to_string()))?;
 
         let want = d["requestId"].as_str().unwrap_or_default().to_string();
         loop {

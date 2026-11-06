@@ -345,17 +345,17 @@ pub fn start() -> Result<u32> {
         .stdout(Stdio::null())
         // gsr's own error text is the only clue when it refuses to start, and
         // swallowing it cost a whole debugging round. Overwritten each start, so
-        // it always holds exactly the last attempt and cannot grow.
+        // it always holds exactly the last attempt and cannot grow. Failing to
+        // open it must never stop recording, so fall back to discarding stderr
+        // rather than unwrapping — a panic here would take the listener with it.
         .stderr(
             crate::config::state_dir()
                 .ok()
-                .map(|d| {
-                    std::fs::create_dir_all(&d).ok();
-                    Stdio::from(
-                        std::fs::File::create(d.join("gsr.log"))
-                            .expect("open gsr.log"),
-                    )
+                .and_then(|d| {
+                    std::fs::create_dir_all(&d).ok()?;
+                    std::fs::File::create(d.join("gsr.log")).ok()
                 })
+                .map(Stdio::from)
                 .unwrap_or_else(Stdio::null),
         )
         .spawn()

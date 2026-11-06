@@ -97,17 +97,24 @@ impl PowerApp {
         match clipper::state::set_gsr_seconds(secs) {
             Ok(()) => {
                 self.gsr_secs = secs;
-                let restarted = if clipper::gsr::pid().is_some() {
-                    clipper::gsr::stop().ok();
-                    clipper::gsr::start().is_ok()
-                } else {
-                    false
+                // Only claim a restart if the recorder really came back as a
+                // different process. `start()` happily returns the pid of one
+                // that is still running, so trusting `is_ok()` would let the
+                // status say "restarted" while the old length stayed live.
+                let outcome = match clipper::gsr::pid() {
+                    None => "",
+                    Some(previous) => {
+                        clipper::gsr::stop().ok();
+                        match clipper::gsr::start() {
+                            Ok(new_pid) if new_pid != previous => " (recorder restarted)",
+                            _ => " (applies when GSR next starts)",
+                        }
+                    }
                 };
                 self.gsr_running = clipper::gsr::pid().is_some();
                 self.set_status(format!(
-                    "GSR clip length set to {}{}",
-                    Self::buffer_label(secs),
-                    if restarted { " (recorder restarted)" } else { "" }
+                    "GSR clip length set to {}{outcome}",
+                    Self::buffer_label(secs)
                 ));
             }
             Err(e) => self.set_status(format!("could not change GSR length: {e:#}")),

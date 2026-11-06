@@ -19,11 +19,14 @@ pub fn config_dir() -> Result<PathBuf> {
 
 /// Volatile runtime state (the mute flag). Cleared on reboot is fine.
 pub fn state_dir() -> Result<PathBuf> {
-    let base = dirs::state_dir().unwrap_or_else(|| {
-        dirs::home_dir()
-            .expect("no home directory")
-            .join(".local/state")
-    });
+    // Propagate rather than expect: this runs inside the long-lived listener,
+    // and a missing HOME should surface as an error message, not a panic.
+    let base = match dirs::state_dir() {
+        Some(base) => base,
+        None => dirs::home_dir()
+            .context("no state directory and no home directory to fall back on")?
+            .join(".local/state"),
+    };
     Ok(base.join("clipper"))
 }
 

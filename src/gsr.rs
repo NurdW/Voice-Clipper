@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Control for GPU Screen Recorder (`gpu-screen-recorder`), the low-overhead
 //! alternative to OBS.
 //!

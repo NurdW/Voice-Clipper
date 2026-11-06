@@ -35,7 +35,7 @@ Wayland.
 | `src/config.rs` | paths, phrase file, OBS websocket settings, OBS output folder (parsed from its ini files) |
 | `src/gsr.rs` | GPU Screen Recorder control (start / save / stop by signal, `/proc` discovery) |
 | `src/state.rs` | the mute flag (a file's existence — deliberately dumb) |
-| `gui/` | `voice-clipper`: power button, clip button, gsr button (eframe/egui, same toolkit as glaunch-gui) |
+| `gui/` | `voice-clipper`: power button, clip button, gsr button (eframe/egui) |
 | `systemd/` | user service for the always-on listener |
 | `desktop/` | autostart + taskbar identity file (`@HOME@` is substituted by install.sh) |
 | `assets/` | app icon source (SVG) and the 64x64 RGBA embedded for the window icon |
@@ -187,4 +187,23 @@ Two rules that are easy to get wrong:
    promise.
 2. **A fix bundled with a feature is a MINOR, not a PATCH.** The feature sets the
    bump.
+
+## License
+
+GPL-3.0-or-later. See `LICENSE`, and SPDX headers identify it in every source
+file.
+
+In plain terms:
+
+- You may use it for anything, including commercially.
+- You may fork it, modify it, and redistribute it.
+- If you distribute a modified version, you must release its source under
+  GPL-3.0 too, and say what you changed. That is the whole point: this code can
+  be built on, but it can never be closed off.
+- There is no warranty, as is standard for free software.
+
+One thing people get wrong about GPL, worth stating out loud: **charging money
+for copies is allowed.** What GPL forbids is making a derivative closed-source.
+A fork sold for profit would have to ship its full source under the same terms,
+which is what keeps the work open rather than what makes it free of charge.
 

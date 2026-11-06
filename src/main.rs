@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! clipctl — voice-triggered game clipping for Linux, on top of OBS.
 //!
 //! What it actually does: OBS keeps a rolling replay buffer in RAM. This tool

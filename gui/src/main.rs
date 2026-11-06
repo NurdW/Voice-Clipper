@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! voice clipper — power button + clip button, nothing else.
 //!
 //! Green power = listening for your phrases. Grey = muted (mic still runs,
@@ -353,7 +354,7 @@ fn side_button(
 
 /// Sample a circular arc into a polyline.
 ///
-/// Why not a real arc shape: egui 0.29 (the version glaunch-gui uses) has no
+/// Why not a real arc shape: egui 0.29 has no
 /// arc primitive at all, so a 64-point polyline is the portable way to draw a
 /// ring with a gap in it.
 fn arc_points(center: Pos2, radius: f32, a_min: f32, a_max: f32, steps: usize) -> Vec<Pos2> {

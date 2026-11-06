@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! A short sound when a clip actually lands on disk.
 //!
 //! Deliberately fire-and-forget in a detached child process: a missing or

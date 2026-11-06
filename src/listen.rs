@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The always-on listener: mic -> Vosk keyword spotting -> OBS replay save.
 
 use std::sync::atomic::{AtomicBool, Ordering};

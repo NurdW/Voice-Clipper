@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Paths and configuration loading.
 //!
 //! Deliberate rule for this whole project: the OBS websocket password is never

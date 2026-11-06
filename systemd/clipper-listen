@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # clipper-listen — start the voice listener with a usable display session.
 #
 # Why this exists: gpu-screen-recorder needs WAYLAND_DISPLAY to enumerate

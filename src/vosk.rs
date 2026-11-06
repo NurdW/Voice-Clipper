@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Hand-written FFI bindings to libvosk (Fedora: `vosk-api-devel`).
 //!
 //! Signatures copied from upstream src/vosk_api.h — the C API is tiny, so a

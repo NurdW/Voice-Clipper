@@ -1,11 +1,13 @@
 [package]
 name = "voice-clipper"
-version = "1.0.0"
+version = "1.0.1"
+license = "GPL-3.0-or-later"
 edition = "2024"
 description = "Power button + clip button: toggle voice listening, or save a clip right now."
 
 [dependencies]
-# egui/eframe — same GUI toolkit glaunch-gui uses, so one style across your tools.
+# egui/eframe — immediate-mode GUI, so the widget tree is rebuilt from state
+# every frame and there is no separate UI state to keep in sync.
 eframe = "0.29"
 # Reuse the real mute-state logic from the CLI so the button and `clipctl toggle`
 # can never disagree about what "on" means.

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Build clipper and wire it up for your user account. No sudo required —
 # everything lands in ~/.local/bin, ~/.config/systemd/user, ~/.config/autostart.
 #

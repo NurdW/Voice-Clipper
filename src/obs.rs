@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Minimal obs-websocket 5.7.x client — just enough to save the replay buffer.
 //!
 //! Wire format verified against the 5.7.3 sources, not against docs:

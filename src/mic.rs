@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Microphone capture via `pw-record`.
 //!
 //! Why a subprocess instead of an audio crate: PipeWire already gives us a

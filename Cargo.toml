@@ -1,12 +1,12 @@
 # Workspace: the CLI lives at the repo root, the power-toggle GUI in gui/.
-# Same layout as glaunch-fork so the two projects stay easy to reason about.
 [workspace]
 members = [".", "gui"]
 default-members = [".", "gui"]
 
 [package]
 name = "clipper"
-version = "1.0.0"
+version = "1.0.1"
+license = "GPL-3.0-or-later"
 edition = "2024"
 description = "Voice-triggered game clipping: saves the OBS replay buffer when you say one of your phrases. Fully offline."
 

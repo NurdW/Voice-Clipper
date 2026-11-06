@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Throwaway verification probe for the OBS websocket replay-buffer trigger.
 
 The real client lives in Rust (clipctl). This exists only to prove the OBS side

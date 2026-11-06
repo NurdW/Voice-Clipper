@@ -1,0 +1,12 @@
+[package]
+name = "voice-clipper"
+version = "0.1.0"
+edition = "2024"
+description = "Power button + clip button: toggle voice listening, or save a clip right now."
+
+[dependencies]
+# egui/eframe — same GUI toolkit glaunch-gui uses, so one style across your tools.
+eframe = "0.29"
+# Reuse the real mute-state logic from the CLI so the button and `clipctl toggle`
+# can never disagree about what "on" means.
+clipper = { path = ".." }

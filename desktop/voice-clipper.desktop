@@ -1,0 +1,27 @@
+# Launcher / taskbar identity for the voice clipper window.
+#
+# Why this exists: eframe (0.29 through 0.33) never passes an app id to winit,
+# so on Wayland the window has NO app_id, and Plasma's task manager skips
+# windows it cannot associate with an application — the window shows on screen
+# but never appears in the taskbar. Running the window under X11 instead makes
+# winit derive WM_CLASS from the executable name ("voice-clipper"), and
+# StartupWMClass below matches it to this file, so you get a proper entry with
+# the right name.
+#
+# Tradeoff: the window renders through XWayland. For a 250x300 utility window
+# that is invisible in practice; to go back to native Wayland, drop the
+# `env -u WAYLAND_DISPLAY` from the Exec line in ~/.config/autostart.
+[Desktop Entry]
+Type=Application
+Name=voice clipper
+GenericName=Game clip recorder
+Comment=Power button for voice clipping, plus a button to save a clip right now
+# VOICE_CLIPPER_POS puts the window on the second monitor (DP-2 starts at
+# x=2560 here). egui cannot see monitor geometry, so it is passed in; if you
+# rearrange screens, change or drop it — a bad value just opens off-screen.
+Exec=env -u WAYLAND_DISPLAY VOICE_CLIPPER_POS=3690,300 @HOME@/.local/bin/voice-clipper
+Icon=voice-clipper
+Terminal=false
+Categories=AudioVideo;Audio;Video;
+StartupWMClass=voice-clipper
+X-KDE-StartupNotify=false

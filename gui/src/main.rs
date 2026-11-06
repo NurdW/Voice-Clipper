@@ -71,7 +71,7 @@ impl PowerApp {
 
     /// Human label for a buffer length: 180 -> "3m", 45 -> "45s".
     fn buffer_label(secs: u32) -> String {
-        if secs >= 60 && secs % 60 == 0 {
+        if secs >= 60 && secs.is_multiple_of(60) {
             format!("{}m", secs / 60)
         } else {
             format!("{secs}s")

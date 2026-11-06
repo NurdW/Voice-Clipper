@@ -13,3 +13,7 @@
 *.swp
 *~
 .DS_Store
+
+# Python bytecode from the dev probe scripts
+__pycache__/
+*.pyc

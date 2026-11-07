@@ -1,6 +1,6 @@
 [package]
 name = "voice-clipper"
-version = "2.0.1"
+version = "2.1.0"
 license = "GPL-3.0-or-later"
 edition = "2024"
 description = "Power button + clip button: toggle voice listening, or save a clip right now."

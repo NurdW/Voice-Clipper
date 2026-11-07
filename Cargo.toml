@@ -5,7 +5,7 @@ default-members = [".", "gui"]
 
 [package]
 name = "clipper"
-version = "2.0.1"
+version = "2.1.0"
 license = "GPL-3.0-or-later"
 edition = "2024"
 description = "Voice-triggered game clipping: saves the OBS replay buffer when you say one of your phrases. Fully offline."

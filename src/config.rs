@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Paths and configuration loading.
 //!
-//! Deliberate rule for this whole project: the OBS websocket password is never
-//! copied into our own config or into source code. We read it from OBS's own
-//! config file at runtime, so rotating it in OBS's UI is enough — nothing here
-//! goes stale and no secret is duplicated on disk.
+//! Everything this tool needs lives in files it owns: `~/.config/clipper/` for
+//! settings you edit by hand, `~/.local/state/clipper/` for the toggles the GUI
+//! flips. Nothing here stores a secret, because nothing here needs one.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
 
 /// Where clipper keeps its own user-editable files.
 pub fn config_dir() -> Result<PathBuf> {
@@ -39,25 +37,33 @@ pub fn muted_flag() -> Result<PathBuf> {
     Ok(state_dir()?.join("muted"))
 }
 
-/// Presence of this file means "do not keep restarting the replay buffer".
-/// Absent means the listener keeps the buffer alive, which is what you want
-/// while gaming and what the feature did before the toggle existed.
-pub fn auto_buffer_flag() -> Result<PathBuf> {
-    Ok(state_dir()?.join("auto_buffer_off"))
+/// Where GSR writes clips. Owns this decision outright: it used to be read out
+/// of OBS's profile ini, which meant deleting OBS silently moved every clip to
+/// a different folder. Set it by hand or with CLIPPER_GSR_DIR.
+pub fn gsr_dir_file() -> Result<PathBuf> {
+    Ok(config_dir()?.join("gsr_dir.txt"))
+}
+
+/// Presence means "do not put the microphone on the recording".
+pub fn gsr_no_mic_flag() -> Result<PathBuf> {
+    Ok(state_dir()?.join("gsr_no_mic"))
+}
+
+/// Presence means "do not put desktop/game audio on the recording".
+pub fn gsr_no_desktop_flag() -> Result<PathBuf> {
+    Ok(state_dir()?.join("gsr_no_desktop"))
 }
 
 /// Presence of this file means "keep GPU Screen Recorder running".
 ///
-/// Note the polarity is the opposite of `auto_buffer_off`: OBS is the original
-/// recorder and was always kept alive, so its flag records the exception. GSR
-/// is opt-in, because auto-starting a second recorder by default would double
-/// the capture cost without anyone asking.
+/// Opt-in rather than the default: auto-starting a recorder nobody asked for is
+/// a surprise, so the listener only does it once you flip the switch.
 pub fn gsr_auto_flag() -> Result<PathBuf> {
     Ok(state_dir()?.join("gsr_auto_on"))
 }
 
-/// Holds the GSR replay-buffer length in seconds. OBS keeps its own length in
-/// its own profile, but gsr has no config we own, so the number lives here.
+/// Holds the GSR replay-buffer length in seconds. The recorder has no config
+/// file of its own, so the number chosen in the GUI lives here.
 pub fn gsr_seconds_file() -> Result<PathBuf> {
     Ok(state_dir()?.join("gsr_seconds"))
 }
@@ -97,32 +103,6 @@ pub fn find_model() -> Result<PathBuf> {
     found.into_iter().next().context("no vosk-model-* directory found")
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub struct ObsWsSettings {
-    pub server_port: Option<u16>,
-    pub server_password: Option<String>,
-    pub auth_required: Option<bool>,
-    pub server_enabled: Option<bool>,
-}
-
-impl ObsWsSettings {
-    /// Read OBS's own obs-websocket config. Never printed, never logged.
-    pub fn load() -> Result<Self> {
-        let base = dirs::config_dir().context("no ~/.config")?.join("obs-studio");
-        let path = base.join("plugin_config").join("obs-websocket").join("config.json");
-        let raw = fs::read_to_string(&path)
-            .with_context(|| format!("could not read {} — is obs-websocket enabled in OBS?", path.display()))?;
-        let s: Self = serde_json::from_str(&raw).context("obs-websocket config.json is not valid JSON")?;
-        if s.server_enabled == Some(false) {
-            bail!("obs-websocket server is disabled in OBS (Settings -> WebSocket Server). Enable it.");
-        }
-        Ok(s)
-    }
-
-    pub fn port(&self) -> u16 {
-        self.server_port.unwrap_or(4455)
-    }
-}
 
 /// Trigger phrases, one per line. Blank lines and `#` comments are ignored.
 /// Vosk matches words case-insensitively against its own vocabulary, so we
@@ -166,66 +146,10 @@ pub fn ensure_dirs() -> Result<()> {
     Ok(())
 }
 
-/// Read a `key = value` pair out of ini-style text (OBS uses these).
-fn ini_value(text: &str, section: &str, key: &str) -> Option<String> {
-    let mut current = String::new();
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with('[') && t.ends_with(']') {
-            current = t[1..t.len() - 1].to_string();
-        } else if current == section
-            && let Some((k, v)) = t.split_once('=')
-            && k.trim() == key
-        {
-            return Some(v.trim().to_string());
-        }
-    }
-    None
-}
-
-/// The folder OBS writes recordings/replays into, read straight out of its
-/// profile ini files. Reading the files instead of asking OBS over the socket
-/// means this works whether or not OBS is currently running.
-///
-/// OBS does not always record which profile is active, so: use the first
-/// profile whose output folder actually exists, and if none exists yet, use the
-/// first declared one. With several profiles and no running OBS this can pick
-/// the wrong folder — set CLIPPER_GSR_DIR to override.
-pub fn obs_record_dir() -> Option<PathBuf> {
-    let base = dirs::config_dir()?.join("obs-studio");
-    let profiles = base.join("basic").join("profiles");
-    let mut found: Vec<PathBuf> = fs::read_dir(&profiles)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    found.sort();
-    let mut fallback = None;
-    for dir in found {
-        let Ok(ini) = fs::read_to_string(dir.join("basic.ini")) else {
-            continue;
-        };
-        let Some(raw) = ini_value(&ini, "SimpleOutput", "FilePath")
-            .or_else(|| ini_value(&ini, "Output", "FilePath"))
-        else {
-            continue;
-        };
-        let p = PathBuf::from(raw);
-        if p.is_dir() {
-            return Some(p);
-        }
-        if fallback.is_none() {
-            fallback = Some(p);
-        }
-    }
-    fallback
-}
 
 #[cfg(test)]
 mod tests {
     use super::build_grammar;
-    use super::ini_value;
 
     #[test]
     fn grammar_is_plain_json_with_unk_last() {
@@ -235,17 +159,5 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&g).expect("grammar must be valid JSON");
         assert_eq!(v.as_array().unwrap().len(), 3);
         assert_eq!(v.as_array().unwrap()[2], "[unk]");
-    }
-
-    #[test]
-    fn ini_lookup_finds_the_right_section_only() {
-        let text = "[Basic]\nProfile=Untitled\n\n[SimpleOutput]\nFilePath=/mnt/storage/obs-record\nRecRBTime=300\n\n[Output]\nFilePath=/elsewhere\n";
-        assert_eq!(ini_value(text, "Basic", "Profile").as_deref(), Some("Untitled"));
-        assert_eq!(
-            ini_value(text, "SimpleOutput", "FilePath").as_deref(),
-            Some("/mnt/storage/obs-record")
-        );
-        assert_eq!(ini_value(text, "Output", "FilePath").as_deref(), Some("/elsewhere"));
-        assert_eq!(ini_value(text, "SimpleOutput", "Nope"), None);
     }
 }

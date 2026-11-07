@@ -2,7 +2,7 @@
 //! voice clipper — power button + clip button, nothing else.
 //!
 //! Green power = listening for your phrases. Grey = muted (mic still runs,
-//! speech is ignored). The clip button saves OBS's replay buffer right now,
+//! speech is ignored). The clip button saves the replay buffer right now,
 //! same as saying your phrase or running `clipctl clip`.
 //!
 //! The mute state lives in the same file `clipctl toggle` uses, so the KDE
@@ -37,23 +37,18 @@ struct PowerApp {
     /// movement too — refreshing it on every paint would be wasteful.
     gsr_running: bool,
     gsr_poll: f32,
-    /// Whether the listener should keep restarting OBS's replay buffer.
-    auto_buffer: bool,
-    /// Same for GPU Screen Recorder. The two are mutually exclusive: two
-    /// recorders grabbing one screen is double the overhead for one clip.
+    /// Whether the listener keeps GPU Screen Recorder running.
     gsr_auto: bool,
-    /// OBS clip length in seconds, read from OBS. `false` until the first
-    /// successful read, so the menu can show "?" instead of lying.
-    obs_secs: u32,
-    obs_known: bool,
     /// GSR clip length, which lives in our own state file because gsr has no
     /// config we own.
     gsr_secs: u32,
+    /// Which audio sources go on the recording. Both on unless switched off.
+    mic_on: bool,
+    desktop_on: bool,
 }
 
 impl PowerApp {
     fn new() -> Self {
-        let buffer = clipper::obs::Obs::current_buffer_seconds().ok().flatten();
         Self {
             muted: clipper::state::is_muted().unwrap_or(true),
             flash: 0.0,
@@ -62,11 +57,10 @@ impl PowerApp {
             clipping: false,
             gsr_running: clipper::gsr::pid().is_some(),
             gsr_poll: 0.0,
-            auto_buffer: clipper::state::auto_buffer_enabled().unwrap_or(true),
             gsr_auto: clipper::state::gsr_auto_enabled().unwrap_or(false),
-            obs_secs: buffer.unwrap_or(180) as u32,
-            obs_known: buffer.is_some(),
             gsr_secs: clipper::gsr::seconds(),
+            mic_on: clipper::state::gsr_mic_enabled().unwrap_or(true),
+            desktop_on: clipper::state::gsr_desktop_enabled().unwrap_or(true),
         }
     }
 
@@ -76,19 +70,6 @@ impl PowerApp {
             format!("{}m", secs / 60)
         } else {
             format!("{secs}s")
-        }
-    }
-
-    /// Apply a new OBS clip length. Blocking on purpose: it is a localhost call
-    /// and the window has nothing else to do, same tradeoff as `clip_now`.
-    fn apply_obs_buffer(&mut self, secs: u32) {
-        match clipper::obs::Obs::apply_buffer_seconds(secs) {
-            Ok(_) => {
-                self.obs_secs = secs;
-                self.obs_known = true;
-                self.set_status(format!("OBS clip length set to {}", Self::buffer_label(secs)));
-            }
-            Err(e) => self.set_status(format!("could not change OBS length: {e:#}")),
         }
     }
 
@@ -122,30 +103,9 @@ impl PowerApp {
         }
     }
 
-    /// Turn OBS keep-alive on or off, switching GSR's off if that would mean
-    /// both recorders running.
-    fn set_keep_obs(&mut self, on: bool) {
-        self.auto_buffer = on;
-        if on && self.gsr_auto {
-            self.gsr_auto = false;
-            if let Err(e) = clipper::state::set_gsr_auto(false) {
-                self.set_status(format!("could not save setting: {e:#}"));
-            }
-        }
-        if let Err(e) = clipper::state::set_auto_buffer(on) {
-            self.set_status(format!("could not save setting: {e:#}"));
-        }
-    }
-
-    /// Turn GSR keep-alive on or off, switching OBS's off in the same move.
+    /// Turn GSR keep-alive on or off.
     fn set_keep_gsr(&mut self, on: bool) {
         self.gsr_auto = on;
-        if on && self.auto_buffer {
-            self.auto_buffer = false;
-            if let Err(e) = clipper::state::set_auto_buffer(false) {
-                self.set_status(format!("could not save setting: {e:#}"));
-            }
-        }
         if let Err(e) = clipper::state::set_gsr_auto(on) {
             self.set_status(format!("could not save setting: {e:#}"));
         }
@@ -166,25 +126,35 @@ impl PowerApp {
         self.flash = 1.0;
     }
 
-    /// Ask OBS to write the replay buffer out. Runs on the UI thread on purpose:
-    /// it is a single localhost request that returns in well under a second, and
-    /// keeping it synchronous avoids a whole class of threading bugs for one call.
-    fn clip_now(&mut self) {
-        self.clipping = true;
-        let result = clipper::config::ObsWsSettings::load()
-            .and_then(|s| clipper::obs::Obs::connect(&s))
-            .and_then(|mut obs| obs.save_replay().map(|_| ()));
-        self.clipping = false;
-        self.status_age = 0.0;
-        self.status = match result {
-            Ok(()) => {
-                if let Err(e) = clipper::sound::play() {
-                    eprintln!("voice-clipper: could not play the clip sound: {e:#}");
-                }
-                "clip saved".to_string()
-            }
-            Err(e) => format!("{e:#}"),
+    /// Choose which audio goes on the recording. gsr picks its sources when it
+    /// launches, so a live recorder has to restart for this to take effect.
+    fn apply_gsr_audio(&mut self, mic: bool, desktop: bool) {
+        let saved = clipper::state::set_gsr_mic(mic)
+            .and_then(|_| clipper::state::set_gsr_desktop(desktop));
+        if let Err(e) = saved {
+            self.set_status(format!("could not save audio setting: {e:#}"));
+            return;
+        }
+        self.mic_on = mic;
+        self.desktop_on = desktop;
+        let outcome = match clipper::gsr::pid() {
+            None => "",
+            Some(previous) => match clipper::gsr::stop().and_then(|_| clipper::gsr::start()) {
+                Ok(new_pid) if new_pid != previous => " (recorder restarted)",
+                _ => " (applies when GSR next starts)",
+            },
         };
+        self.gsr_running = clipper::gsr::pid().is_some();
+        self.set_status(format!("audio: {}{outcome}", Self::audio_label(mic, desktop)));
+    }
+
+    fn audio_label(mic: bool, desktop: bool) -> &'static str {
+        match (mic, desktop) {
+            (true, true) => "mic + desktop",
+            (true, false) => "mic only",
+            (false, true) => "desktop only",
+            (false, false) => "none (silent video)",
+        }
     }
 
     /// One button, two jobs: if GPU Screen Recorder is not running, start its
@@ -382,7 +352,8 @@ impl eframe::App for PowerApp {
         if self.gsr_poll >= 2.0 {
             self.gsr_poll = 0.0;
             self.gsr_running = clipper::gsr::pid().is_some();
-            self.auto_buffer = clipper::state::auto_buffer_enabled().unwrap_or(self.auto_buffer);
+            self.mic_on = clipper::state::gsr_mic_enabled().unwrap_or(self.mic_on);
+            self.desktop_on = clipper::state::gsr_desktop_enabled().unwrap_or(self.desktop_on);
             self.gsr_auto = clipper::state::gsr_auto_enabled().unwrap_or(self.gsr_auto);
             self.gsr_secs = clipper::gsr::seconds();
         }
@@ -392,7 +363,6 @@ impl eframe::App for PowerApp {
         // the dropdown open. Nothing sets this variable in normal use.
         if std::env::var("VOICE_CLIPPER_DEBUG_POPUP").is_ok() {
             ctx.memory_mut(|m| {
-                m.open_popup(egui::Id::new("obs_menu"));
                 m.open_popup(egui::Id::new("gsr_menu"));
             });
         }
@@ -469,83 +439,26 @@ impl eframe::App for PowerApp {
 
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    // One width for both clip buttons so they read as a pair.
-                    let btn_w =
-                        side_button_width(ui, "OBS").max(side_button_width(ui, "GSR"));
-
-                    let clip = side_button(
+                    // GPU Screen Recorder: no websocket, just signals. Off means
+                    // "start the buffer", on means "save it". The label stays
+                    // constant; the clapper colour and the row below carry the
+                    // state, so nothing here can overflow the button.
+                    let gsr_w = side_button_width(ui, "GSR");
+                    let gsr_btn = side_button(
                         ui,
-                        "OBS",
-                        // Green while something keeps the OBS buffer alive, red
-                        // when it is on its own and can be off without warning.
+                        "GSR",
+                        // Grey while a save is in flight, then the colour
+                        // reports the keep-alive setting: green means "this is
+                        // the armed recorder".
                         if self.clipping {
                             GREY
-                        } else if self.auto_buffer {
+                        } else if self.gsr_auto {
                             GREEN
                         } else {
                             RED
                         },
                         !self.clipping,
-                        btn_w,
-                    );
-                    if clip.clicked() {
-                        self.clip_now();
-                    }
-
-                    // One menu per recorder, hung off the button it belongs to.
-                    // Each recorder has its own length and its own keep-alive,
-                    // so there is no single "buffer" setting left to share.
-                    let obs_open = ui.memory(|m| m.is_popup_open(egui::Id::new("obs_menu")));
-                    let obs_arrow = caret_button(ui, obs_open)
-                        .on_hover_text("OBS clip length and keep-alive");
-                    if obs_arrow.clicked() {
-                        ui.memory_mut(|m| m.toggle_popup(egui::Id::new("obs_menu")));
-                    }
-                    egui::popup::popup_below_widget(
-                        ui,
-                        egui::Id::new("obs_menu"),
-                        &obs_arrow,
-                        egui::popup::PopupCloseBehavior::CloseOnClickOutside,
-                        |ui| {
-                            ui.set_min_width(170.0);
-                            ui.label(egui::RichText::new("OBS clip length").weak().small());
-                            for secs in [30u32, 60, 120, 180, 300] {
-                                let picked = ui.selectable_value(
-                                    &mut self.obs_secs,
-                                    secs,
-                                    Self::buffer_label(secs),
-                                );
-                                if picked.clicked() {
-                                    self.apply_obs_buffer(secs);
-                                }
-                            }
-                            ui.separator();
-                            let mut on = self.auto_buffer;
-                            let cb = ui
-                                .checkbox(&mut on, "keep OBS buffer on")
-                                .on_hover_text(
-                                    "On: the listener restarts OBS's replay buffer if it is off.\n\
-                                     Off: your manual choice in OBS is respected.\n\
-                                     Turning this on turns GSR's keep-alive off.",
-                                );
-                            if cb.changed() {
-                                self.set_keep_obs(on);
-                            }
-                        },
-                    );
-
-                    // GPU Screen Recorder: no websocket, just signals. Off means
-                    // "start the buffer", on means "save it". The label stays
-                    // constant; the clapper colour and the row below carry the
-                    // state, so nothing here can overflow the button.
-                    let gsr_btn = side_button(
-                        ui,
-                        "GSR",
-                        // Same rule as OBS: the colour reports the keep-alive
-                        // setting, so green means "this is the armed recorder".
-                        if self.gsr_auto { GREEN } else { RED },
-                        !self.clipping,
-                        btn_w,
+                        gsr_w,
                     );
                     // on_hover_text consumes the Response, so the click check
                     // has to use what it returns.
@@ -587,12 +500,34 @@ impl eframe::App for PowerApp {
                             let cb = ui
                                 .checkbox(&mut on, "keep GSR buffer on")
                                 .on_hover_text(
-                                    "On: GPU Screen Recorder runs all the time and the voice\n\
-                                     phrase clips it instead of OBS.\n\
-                                     Turning this on turns OBS's keep-alive off.",
+                                    "On: GPU Screen Recorder runs all the time, from login,\n\
+                                     and the listener restarts it if it ever dies.\n\
+                                     Off: it only runs while you start it by hand.",
                                 );
                             if cb.changed() {
                                 self.set_keep_gsr(on);
+                            }
+                            ui.separator();
+                            ui.label(egui::RichText::new("Record audio").weak().small());
+                            let mut mic = self.mic_on;
+                            let mcb = ui
+                                .checkbox(&mut mic, "microphone")
+                                .on_hover_text(
+                                    "Off: your voice is not on the clip.\n\
+                                     Game and app audio are unaffected.",
+                                );
+                            if mcb.changed() {
+                                self.apply_gsr_audio(mic, self.desktop_on);
+                            }
+                            let mut desk = self.desktop_on;
+                            let dcb = ui
+                                .checkbox(&mut desk, "game / desktop")
+                                .on_hover_text(
+                                    "Off: no game or app sound on the clip.\n\
+                                     With both off the clip is silent video.",
+                                );
+                            if dcb.changed() {
+                                self.apply_gsr_audio(self.mic_on, desk);
                             }
                         },
                     );
@@ -612,7 +547,7 @@ impl eframe::App for PowerApp {
                     ui.add_space(4.0);
                     let ok = matches!(
                         self.status.as_str(),
-                        "clip saved" | "gsr clip saved" | "gsr recording started" | "gsr stopped"
+                        "gsr clip saved" | "gsr recording started" | "gsr stopped"
                     );
                     ui.label(
                         egui::RichText::new(&self.status)

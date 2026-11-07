@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! clipctl — voice-triggered game clipping for Linux, on top of OBS.
+//! clipctl — voice-triggered game clipping for Linux, on GPU Screen Recorder.
 //!
-//! What it actually does: OBS keeps a rolling replay buffer in RAM. This tool
-//! listens to your microphone entirely offline (Vosk, restricted grammar) and,
-//! when you say one of your phrases, asks OBS over its local websocket to
-//! write that buffer out as a file. No cloud, no upload, no Windows.
+//! What it actually does: gpu-screen-recorder keeps a rolling replay buffer in
+//! RAM. This tool listens to your microphone entirely offline (Vosk, restricted
+//! grammar) and, when you say one of your phrases, signals gsr to write that
+//! buffer out as a file. No cloud, no upload, no Windows.
 //!
 //! Run `clipctl doctor` first if anything seems off; it checks every
 //! prerequisite and tells you which one is missing.
@@ -13,8 +13,8 @@ use clap::{Parser, Subcommand};
 
 use anyhow::Result;
 use std::io::Write;
-use clipper::config::{self, ObsWsSettings};
-use clipper::{gsr, listen, mic, obs, state};
+use clipper::config;
+use clipper::{gsr, listen, mic, state};
 
 /// Print that survives a reader hanging up.
 ///
@@ -25,7 +25,7 @@ macro_rules! say {
 }
 
 #[derive(Parser)]
-#[command(name = "clipctl", version, about = "Voice-triggered OBS clipping (offline)")]
+#[command(name = "clipctl", version, about = "Voice-triggered game clipping (offline)")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -35,7 +35,7 @@ struct Cli {
 enum Command {
     /// Save a clip right now (the last N seconds of gameplay).
     Clip,
-    /// Show what OBS reports and whether the listener is armed.
+    /// Show the recorder state and whether the listener is armed.
     Status,
     /// Stop reacting to speech (audio keeps flowing; nothing is recorded).
     Mute,
@@ -56,12 +56,12 @@ enum Command {
     Init,
     /// Check every prerequisite and say which one is missing.
     Doctor,
-    /// Control GPU Screen Recorder, the low-overhead alternative to OBS.
+    /// Control GPU Screen Recorder, the recorder this tool drives.
     Gsr {
         #[command(subcommand)]
         action: GsrAction,
     },
-    /// Read or change how far back the OBS replay buffer reaches.
+    /// Read or change how far back the replay buffer reaches.
     Buffer {
         /// Seconds, e.g. 180 for three minutes. Omit to just report it.
         seconds: Option<u32>,
@@ -115,20 +115,27 @@ fn main() {
     }
 }
 
-/// Buffer length lives in the OBS profile, so this goes through OBS and then
-/// restarts the buffer, because OBS only reads RecRBTime when the buffer starts.
+/// The buffer length lives in our own state file, and gsr only reads it when it
+/// launches, so changing it means restarting the recorder if one is running.
 fn set_buffer(seconds: Option<u32>) -> Result<()> {
-    let current = obs::Obs::current_buffer_seconds()?;
     let Some(secs) = seconds else {
-        match current {
-            Some(s) => say!("replay buffer is {s} seconds ({})", human_secs(s as u32)),
-            None => say!("OBS did not report a buffer length"),
-        }
+        let live = gsr::seconds();
+        say!("replay buffer is {live} seconds ({})", human_secs(live));
+        say!("clips to   : {}", gsr::output_dir().display());
         return Ok(());
     };
-    let profile = obs::Obs::apply_buffer_seconds(secs)?;
+    state::set_gsr_seconds(secs)?;
+    // Only claim a restart if a different process came back; `start()` happily
+    // returns the pid of one that never died.
+    let note = match gsr::pid() {
+        None => "",
+        Some(previous) => match gsr::stop().and_then(|_| gsr::start()) {
+            Ok(new_pid) if new_pid != previous => " and restarted",
+            _ => " (applies when GSR next starts)",
+        },
+    };
     say!(
-        "replay buffer set to {secs} seconds ({}) in profile '{profile}' and restarted",
+        "replay buffer set to {secs} seconds ({}){note}",
         human_secs(secs)
     );
     Ok(())
@@ -174,10 +181,8 @@ fn gsr_cmd(action: GsrAction) -> Result<()> {
 }
 
 fn clip() -> Result<()> {
-    let settings = ObsWsSettings::load()?;
-    let mut obs = obs::Obs::connect(&settings)?;
-    obs.save_replay()?;
-    say!("clip saved");
+    gsr::save()?;
+    say!("clip saved to {}", gsr::output_dir().display());
     if let Err(e) = clipper::sound::play() {
         eprintln!("clipctl: could not play the clip sound: {e:#}");
     }
@@ -185,18 +190,20 @@ fn clip() -> Result<()> {
 }
 
 fn status() -> Result<()> {
-    let settings = ObsWsSettings::load()?;
-    let mut obs = obs::Obs::connect(&settings)?;
-    say!("connection : {}", obs.versions()?);
+    say!("recorder   : {}", gsr::status_line());
+    say!("buffer     : {} seconds", gsr::seconds());
+    say!("clips to   : {}", gsr::output_dir().display());
+    let mic_on = state::gsr_mic_enabled()?;
+    let desktop_on = state::gsr_desktop_enabled()?;
     say!(
-        "replay buf : {}",
-        if obs.replay_active()? {
-            "running"
-        } else {
-            "NOT running (start it in OBS, or launch OBS with --startreplaybuffer)"
+        "audio      : {}",
+        match (mic_on, desktop_on) {
+            (true, true) => "mic + desktop".to_string(),
+            (true, false) => "mic only".to_string(),
+            (false, true) => "desktop only".to_string(),
+            (false, false) => "none (silent video)".to_string(),
         }
     );
-    say!("clips to   : {}", obs.record_dir()?);
     say!("listening  : {}", if state::is_muted()? { "muted" } else { "on" });
     match config::load_phrases() {
         Ok(p) => say!("phrases    : {}", p.len()),
@@ -288,26 +295,39 @@ fn doctor() -> Result<()> {
         "run: clipctl init",
     );
 
-    let ws = ObsWsSettings::load();
+    // gpu-screen-recorder is the recorder now, so everything below is about it.
+    let gsr_version = std::process::Command::new(gsr::BIN)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     check(
-        "obs-websocket enabled in OBS",
-        ws.is_ok(),
-        "OBS -> Settings -> WebSocket Server -> enable (and 'Automatically connect')",
+        "gpu-screen-recorder present",
+        gsr_version.is_some(),
+        "Fedora: sudo dnf copr enable brycensranch/gpu-screen-recorder-git && sudo dnf install gpu-screen-recorder",
     );
 
-    if let Ok(settings) = ws {
-        match obs::Obs::connect(&settings) {
-            Ok(mut o) => {
-                say!("[ok  ] OBS reachable — {}", o.versions()?);
-                let active = o.replay_active()?;
-                check(
-                    "replay buffer running",
-                    active,
-                    "in OBS click 'Start Replay Buffer', or start OBS with --startreplaybuffer",
-                );
-                say!("       clips go to: {}", o.record_dir()?);
-            }
-            Err(e) => check("OBS reachable on localhost", false, &format!("{e:#}")),
+    if let Some(v) = gsr_version {
+        say!("[ok  ] gpu-screen-recorder {v}");
+        match gsr::monitor() {
+            Ok(m) => say!("       capture target: {m}"),
+            Err(e) => check("a screen gsr can capture", false, &format!("{e:#}")),
+        }
+        let dir = gsr::output_dir();
+        check(
+            "clip folder exists",
+            dir.is_dir(),
+            &format!(
+                "mkdir -p {} (or point CLIPPER_GSR_DIR at a folder that exists)",
+                dir.display()
+            ),
+        );
+        say!("       clips go to: {}", dir.display());
+        if gsr::pid().is_none() {
+            say!("[note] gpu-screen-recorder is not running right now.");
+            say!("       Start it with the GUI's clip button or `clipctl gsr start`, then tick");
+            say!("       'keep GSR buffer on' so the listener brings it back from now on.");
         }
     }
 

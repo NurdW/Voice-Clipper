@@ -38,7 +38,7 @@ if [ -z "${WAYLAND_DISPLAY:-}" ]; then
     done
 fi
 
-# gsr and the OBS websocket both want these; harmless defaults if unset.
+# gsr wants these to find the screen to capture; harmless defaults if unset.
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-KDE}"
 export DISPLAY="${DISPLAY:-:0}"
 

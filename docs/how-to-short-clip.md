@@ -4,13 +4,20 @@ Your PC records the last few minutes of gameplay into RAM all the time, and
 saves it to a file when you say a phrase. Nothing is uploaded anywhere — the
 speech recognition runs on your own machine.
 
-Clips land in: **/mnt/storage/obs-record/** (named `Clip_2026-11-03_06-46-46.mp4`)
+Clips land in: **/mnt/storage/obs-record/gsr/** (named
+`Replay_2026-11-05_14-34-23.mp4` — that naming comes from GPU Screen Recorder,
+not from us)
+
+The recorder is **GPU Screen Recorder** (`gpu-screen-recorder`). It encodes on
+your GPU instead of your CPU, so it costs almost no frames while you play.
 
 ---
 
 ## 1. The short version (do this)
 
-1. Make sure **OBS is open**. That is the recorder. If OBS is closed, nothing records.
+1. Make sure the recorder is running. Click the **GSR** clapperboard once — it
+   turns green. Tick **keep GSR buffer on** in its ▼ menu and it starts by
+   itself at login and gets restarted if it ever dies.
 2. Make sure the power button says **Clipper Enabled** (green).
    - The green button window = click it once to turn listening off/on.
    - Or press **Meta + Alt + C** (Windows key + Alt + C).
@@ -21,48 +28,97 @@ Clips land in: **/mnt/storage/obs-record/** (named `Clip_2026-11-03_06-46-46.mp4
    - `chat did you see that`
    - `chat take notes`
 4. About a second later you hear a short **ding**, and the last few minutes are
-   written to a file. Check it: `xdg-open /mnt/storage/obs-record` (opens the
-   folder).
+   written to a file. Check it: `xdg-open /mnt/storage/obs-record/gsr`
 
 That's it. There is no "start recording" step — it is always recording into RAM.
 
 ---
 
-## 2. How long a clip is
+## 2. The window
 
-A clip is exactly as long as the rolling buffer. Set it in the app: click the
-**`buffer 3m`** pill next to the clip buttons and pick 30s, 1m, 2m, 3m or 5m.
-That is the whole answer for "I want a 30 second clip".
+| Control | What it does |
+|---|---|
+| **power button** | green = listening, grey = muted |
+| **GSR** (clapperboard) | red = start the recorder; green = save a clip right now |
+| **▼** next to it | opens the menu below |
+| `stop GSR` | appears while it runs; stops recording and finalises the file |
 
-From a terminal it is the same thing:
+The ▼ menu holds four things:
+
+- **GSR clip length** — 30s, 1m, 2m, 3m or 5m
+- **keep GSR buffer on** — the listener starts the recorder at login and
+  restarts it within about 30 seconds if it dies
+- **microphone** — off means your voice is not on the clip
+- **game / desktop** — off means no game or app sound on the clip
+
+Changing the clip length or the audio switches restarts the recorder, because
+it picks its buffer size and its audio sources when it starts. The status line
+tells you whether it restarted or will apply next time.
+
+From a terminal, the length is the same thing:
 
 ```bash
 clipctl buffer          # tell me the current length
 clipctl buffer 30       # make every clip the last 30 seconds
 ```
 
-Both go through OBS's own websocket and restart the buffer for you, so it takes
-effect immediately. (By hand: OBS → Settings → Output → Replay Buffer seconds,
-then Stop and Start the Replay Buffer.)
+---
 
-### Trimming a clip you already saved
+## 3. Recording voice or not
 
-OBS has **one** replay buffer, so you cannot hold a 3-minute buffer and a
-30-second buffer at once. If you want a long buffer normally but a short clip
-now and then, save as usual and cut the tail off the file:
+Both audio switches are on by default, and they are independent:
+
+| microphone | game / desktop | you get |
+|---|---|---|
+| on | on | everything, on separate tracks |
+| on | off | your voice only |
+| off | on | game and app sound, no voice |
+| off | off | silent video |
+
+This is not just a mute button. GPU Screen Recorder writes **each source as its
+own track**, so even with everything on you can delete or lower your mic later
+in an editor without touching the game audio. The switches are for when you know
+you never want a source at all — a silent file is smaller and there is nothing to
+forget to delete.
+
+The sources themselves are listed in `~/.config/clipper/gsr_audio.txt`, one per
+line:
+
+```bash
+gpu-screen-recorder --list-application-audio   # app names it can see right now
+gpu-screen-recorder --list-audio-devices       # device names
+```
+
+An app that is **not running** when the recorder starts still gets a track, a
+silent one, which keeps the track order stable between clips.
+
+---
+
+## 4. How long a clip is
+
+A clip is exactly as long as the rolling buffer — set it in the ▼ menu or with
+`clipctl buffer`. That is the whole answer for "I want a 30 second clip".
+
+One buffer means one length: you cannot hold a 3-minute buffer and a 30-second
+buffer at once. If you want a long buffer normally but a short clip now and then,
+save as usual and cut the tail off the file:
 
 ```bash
 shortclip                       # cuts the last 30s from the newest clip
 shortclip 60                    # cuts the last 60s
-shortclip 30 /mnt/storage/obs-record/Clip_2026-11-03_06-46-46.mp4
+shortclip 30 /mnt/storage/obs-record/gsr/Replay_2026-11-05_14-34-23.mp4
 ```
 
 The cut is a **stream copy** (no re-encoding), so it takes about a second and
 does not lose quality. Output file gets `-short.mp4` added to the name.
 
+The buffer lives in **RAM**, so length and bitrate are the same dial: 300 s at
+80 Mbps is roughly 3 GB. If you would rather have the space back, lower one of
+them.
+
 ---
 
-## 3. Changing what you have to say
+## 5. Changing what you have to say
 
 Edit this file, one phrase per line, lowercase:
 
@@ -98,7 +154,7 @@ say it a little slower, or add the shorter version to phrases.txt.
 
 ---
 
-## 4. Turning it off (privacy)
+## 6. Turning it off (privacy)
 
 Muting means: the mic keeps running but speech is ignored. Nothing is written
 to disk unless a phrase matches, and nothing ever leaves the PC.
@@ -110,25 +166,17 @@ to disk unless a phrase matches, and nothing ever leaves the PC.
 | Terminal | `clipctl mute` / `clipctl unmute` / `clipctl toggle` |
 | Stop it completely | `systemctl --user stop clipper` |
 
-`clipctl muted` prints which state you are in.
-
-The **voice clipper** window has two buttons:
-
-- the big **power button** — green means listening, grey means muted
-- **OBS** (clapperboard) — saves a clip immediately, same as saying your phrase
-- **GSR** (clapperboard) — GPU Screen Recorder; see section 9
-- **keep OBS buffer on** — while ticked, the listener restarts OBS's replay
-  buffer if it finds it stopped. Untick it if you turned the buffer off on
-  purpose and want it left alone.
-- **keep GSR buffer on** — greyed out; gsr is started on demand by its own button
+`clipctl muted` prints which state you are in. Note that muting the *listener*
+does not stop the recorder — it keeps recording into RAM and simply ignores
+your voice. To stop recording entirely, click `stop GSR`.
 
 ---
 
-## 5. Checking that everything is healthy
+## 7. Checking that everything is healthy
 
 ```bash
-clipctl doctor      # checks OBS, the websocket, the model, the mic, the phrases
-clipctl status      # what OBS reports right now
+clipctl doctor      # checks the recorder, the model, the mic, the phrases
+clipctl status      # recorder state, clip folder, audio switches, phrases
 clipctl clip        # save a clip right now, no voice needed
 journalctl --user -u clipper -f     # live log of what the listener heard
 ```
@@ -137,23 +185,24 @@ journalctl --user -u clipper -f     # live log of what the listener heard
 
 ---
 
-## 6. If a voice phrase does nothing
+## 8. If a voice phrase does nothing
 
 Work through these in order:
 
 1. `clipctl muted` — is it muted? Click the button.
-2. Is **OBS running**? The recorder is OBS; clipper only tells it when to save.
-3. `clipctl status` — does it say `replay buf : running`?
-   If not: in OBS click **Start Replay Buffer**. (clipper also tries to start it
-   by itself every 30 seconds, but only while OBS is open.)
-4. `clipctl clip` — if this saves a file, the OBS side is fine and the problem
-   is the speech side. Go to section 3 and test with `clipctl hear`.
-5. `journalctl --user -u clipper -n 30` — did it hear something at all?
+2. `clipctl status` — does the recorder line say it is running? If not, click
+   the **GSR** button, and tick **keep GSR buffer on** so this stops happening.
+3. `clipctl clip` — if this saves a file, the recorder side is fine and the
+   problem is the speech side. Go to section 5 and test with `clipctl hear`.
+4. `journalctl --user -u clipper -n 30` — did it hear something at all?
    If it prints `heard: ...` with the wrong words, your phrase needs adjusting.
+5. If the recorder will not start at all, its own error output is in
+   `~/.local/state/clipper/gsr.log`. `reported no monitors` means the service
+   could not see your Wayland session.
 
 ---
 
-## 7. Transcribing audio with whisper (the other thing you asked for)
+## 9. Transcribing audio with whisper
 
 `pwcpp` is installed with the **medium** model at
 `~/.local/share/clipper/models/ggml-medium.bin`.
@@ -175,21 +224,36 @@ that one can run all day while gaming.
 
 ---
 
-## 8. What is installed, and where
+## 10. What is installed, and where
 
 | Thing | Where |
 |---|---|
 | The tools | `~/.local/bin/clipctl`, `~/.local/bin/voice-clipper`, `~/.local/bin/shortclip`, `~/.local/bin/transcribe` |
-| Source code | `~/slopbot/general/clipper/` (Rust) |
+| Source code | `~/slopbot/general/clipper/` (Rust) — also [github.com/NurdW/Voice-Clipper](https://github.com/NurdW/Voice-Clipper) |
 | Your phrases | `~/.config/clipper/phrases.txt` |
+| Audio sources | `~/.config/clipper/gsr_audio.txt` |
+| Clip folder | `~/.config/clipper/gsr_dir.txt` |
 | Speech model (Vosk, 68 MB) | `~/.local/share/clipper/vosk-model-small-en-us-0.15/` |
 | Whisper model (1.5 GB) | `~/.local/share/clipper/models/ggml-medium.bin` |
 | Listener service | `systemctl --user {status,restart,stop} clipper` |
 | Button autostart | `~/.config/autostart/voice-clipper.desktop` |
 | Taskbar identity | `~/.local/share/applications/voice-clipper.desktop` |
 | Hotkey | `~/.local/share/applications/clipper-toggle.desktop` + `kglobalshortcutsrc` |
-| OBS config backup (before I changed anything) | `~/.config/obs-studio/backups/pre-clipper-20261029-172128/` |
-| GPU Screen Recorder (Plan B) | `/usr/bin/gpu-screen-recorder`, from COPR `brycensranch/gpu-screen-recorder-git` |
+| The recorder | `/usr/bin/gpu-screen-recorder`, from COPR `brycensranch/gpu-screen-recorder-git` |
+
+### Settings you can set by environment
+
+Put these in `~/.bashrc`, or in the service file if you want them permanent.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CLIPPER_GSR_MONITOR` | `auto` | which monitor; `auto` picks the first one gsr reports (`DP-1`, `DP-2`, `HDMI-A-1`) |
+| `CLIPPER_GSR_SECONDS` | `300` | how far back the buffer reaches (the ▼ menu writes a state file instead) |
+| `CLIPPER_GSR_DIR` | `gsr_dir.txt`, else `~/Videos/clips` | where replays are written |
+| `CLIPPER_GSR_BITRATE` | `80000` | kilobits/sec, constant bitrate. This is a RAM dial too |
+| `CLIPPER_GSR_FPS` | `60` | frame rate |
+| `CLIPPER_GSR_AUDIO` | *(unset)* | overrides the whole audio file as one mixed track; rarely what you want |
+| `VOICE_CLIPPER_POS` | *(unset)* | where the window opens, e.g. `3690,300` for a second monitor |
 
 ### Why the window runs through XWayland
 
@@ -209,105 +273,9 @@ rm ~/.config/systemd/user/clipper.service
 rm ~/.config/autostart/voice-clipper.desktop
 rm ~/.local/bin/clipctl ~/.local/bin/voice-clipper ~/.local/bin/shortclip ~/.local/bin/transcribe
 rm ~/.local/share/applications/clipper-toggle.desktop ~/.local/share/applications/voice-clipper.desktop
-# OBS settings, if you want them back exactly as they were:
-cp -a ~/.config/obs-studio/backups/pre-clipper-20261029-172128/basic ~/.config/obs-studio/
 dnf5 remove gpu-screen-recorder gpu-screen-recorder-gtk
 dnf5 copr disable brycensranch/gpu-screen-recorder-git
 ```
 
----
-
-## 9. Plan B: GPU Screen Recorder (installed, and the button works)
-
-OBS uses your **CPU** for encoding (x264), which costs frames in a demanding
-60fps game. GPU Screen Recorder does the whole job on the GPU instead, so it
-costs almost nothing. It is installed and verified working on this machine
-(61fps capture, replay save tested).
-
-### The easy way: the `gsr` button
-
-| Button state | What it does when you click |
-|---|---|
-| `GSR` with a **red** clapper | starts the GPU replay buffer in the background |
-| `GSR` with a **green** clapper | saves the last few minutes right now |
-| `stop GSR` (appears while it runs) | stops recording and finalises the file |
-
-The little **▼** next to each clip button opens that recorder's own menu: its
-clip length and its `keep ... buffer on` switch. The two keep-alive switches are
-mutually exclusive on purpose — two recorders grabbing the same screen is double
-the overhead for one clip. Whichever one is armed is what your voice phrase
-clips; with neither running, the phrase falls back to OBS.
-
-GPU clips go to `/mnt/storage/obs-record/gsr/` and are named
-`Replay_2026-11-05_14-34-23.mp4` (that naming comes from gsr, not from us).
-
-With `keep GSR buffer on` ticked, GPU Screen Recorder runs from login and is
-restarted within about 30 seconds if it ever dies or you kill it. If it is not
-coming up, the reason is in the log:
-
-```bash
-journalctl --user -u clipper --since '-10 min' | grep -i gpu-screen
-```
-
-`reported no monitors` means the service could not see your Wayland session — the
-startup wrapper resolves that now, but a stale copy of the wrapper after an
-`install.sh` change is worth checking first.
-
-### Each audio source is its own track
-
-This is the reason to prefer GPU Screen Recorder for clips you intend to edit.
-Every source listed in `~/.config/clipper/gsr_audio.txt` is written as a
-**separate audio track**, tagged with where it came from:
-
-```text
-track 1  Devices: Easy Effects Source     <- your mic, filtered
-track 2  Applications: cs2
-track 3  Applications: deadlock
-track 4  Applications: discord
-track 5  Applications: firefox
-track 6  Applications: spotify
-```
-
-So in an editor you can pull the game down and push your mic up, independently.
-Edit that file to add or remove sources, then restart GSR:
-
-```bash
-gpu-screen-recorder --list-application-audio   # app names it can see right now
-gpu-screen-recorder --list-audio-devices       # device names
-```
-
-Two things to know: an app that is **not running** when GSR starts still gets a
-track, a silent one (keeps the track order stable); and sources written with a
-`|` between them are **mixed into one track** instead — one line per source is
-what keeps them apart.
-
-### The terminal way
-
-```bash
-clipctl gsr status   # is it running, and where do its clips go
-clipctl gsr start    # start the replay buffer
-clipctl gsr save     # write the last few seconds to disk
-clipctl gsr stop     # stop recording
-```
-
-Under the hood it is roughly `gpu-screen-recorder -w DP-1 -c mp4 -r 300 -s 0x0
--f 60 -k h264 -bm cbr -q 80000 -a easyeffects_source -a app:cs2 ... -o <folder>`
-— native resolution, 60 fps, H.264 at 80 Mbps — and saving is just `kill
--USR1` to its process. No socket, no extra daemon.
-
-### Changing its settings
-
-The audio list lives in `~/.config/clipper/gsr_audio.txt`. The rest are
-environment variables, so put them in `~/.bashrc` or in the service file if you
-want them permanent:
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `CLIPPER_GSR_MONITOR` | `auto` | which monitor; `auto` picks the first one gsr reports (`DP-1`, `DP-2`, `HDMI-A-1`) |
-| `CLIPPER_GSR_SECONDS` | `300` | how far back the buffer reaches (the GSR ▼ menu writes a state file instead) |
-| `CLIPPER_GSR_DIR` | your OBS clip folder + `/gsr` | where replays are written |
-| `CLIPPER_GSR_BITRATE` | `80000` | kilobits/sec, constant bitrate. This is a RAM dial too: the buffer lives in RAM, so 300 s at 80 Mbps is about 3 GB |
-| `CLIPPER_GSR_FPS` | `60` | frame rate |
-| `CLIPPER_GSR_AUDIO` | *(unset)* | overrides the whole audio file as one mixed track; rarely what you want |
-
-
+Your clips and your `~/.config/clipper/` files are left alone; delete those by
+hand if you want them gone.

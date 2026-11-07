@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Control for GPU Screen Recorder (`gpu-screen-recorder`), the low-overhead
-//! alternative to OBS.
+//! Control for GPU Screen Recorder (`gpu-screen-recorder`), the recorder this
+//! tool drives.
 //!
 //! gsr is driven entirely by signals — `SIGUSR1` saves the replay buffer,
 //! `SIGINT` stops recording — so this module needs no socket client and no
 //! extra dependencies. Process discovery scans `/proc` for the same reason.
 //!
-//! Settings come from the environment (CLIPPER_GSR_*) rather than a config
-//! struct, matching the rest of this crate where OBS itself is the source of
-//! truth for the buffer length and output folder.
+//! Settings come from the environment (CLIPPER_GSR_*) when set, otherwise from
+//! the state and config files this crate owns.
 
 use std::env;
 use std::fs;
@@ -17,7 +16,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::config::obs_record_dir;
+use crate::config::gsr_dir_file;
 
 pub const BIN: &str = "gpu-screen-recorder";
 
@@ -93,6 +92,33 @@ fn parse_audio_list(txt: &str) -> Vec<String> {
         .collect()
 }
 
+/// Is this source the microphone (as opposed to game and app sound)?
+///
+/// `easyeffects_source` is a virtual device with no "input" in its name, so it
+/// has to be named; everything else that captures follows PipeWire's
+/// `alsa_input.*` / `default_input` naming.
+pub fn is_mic_source(source: &str) -> bool {
+    source == "easyeffects_source" || source.contains("input")
+}
+
+/// Drop the sources the user switched off. Split out from `apply_audio_flags`
+/// so it can be tested without touching the real flag files.
+fn filter_audio(list: Vec<String>, mic: bool, desktop: bool) -> Vec<String> {
+    list.into_iter()
+        .filter(|s| if is_mic_source(s) { mic } else { desktop })
+        .collect()
+}
+
+/// Both flags default to on, so with no flag files this returns the list
+/// untouched.
+pub fn apply_audio_flags(list: Vec<String>) -> Vec<String> {
+    filter_audio(
+        list,
+        crate::state::gsr_mic_enabled().unwrap_or(true),
+        crate::state::gsr_desktop_enabled().unwrap_or(true),
+    )
+}
+
 /// Audio sources, one `-a` each, so every source lands on its own track.
 ///
 /// gsr joins sources written with `|` into ONE mixed track, but a separate `-a`
@@ -104,23 +130,30 @@ fn parse_audio_list(txt: &str) -> Vec<String> {
 /// The list is read from `~/.config/clipper/gsr_audio.txt`, one source per
 /// line, `#` for comments. `CLIPPER_GSR_AUDIO` still wins for a one-off.
 pub fn audio_list() -> Vec<String> {
-    if let Ok(v) = env::var("CLIPPER_GSR_AUDIO") {
-        return v
-            .split('|')
+    let list = if let Ok(v) = env::var("CLIPPER_GSR_AUDIO") {
+        v.split('|')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .collect();
-    }
-    if let Ok(path) = crate::config::gsr_audio_file()
+            .collect()
+    } else if let Ok(path) = crate::config::gsr_audio_file()
         && let Ok(txt) = fs::read_to_string(path)
     {
         let v = parse_audio_list(&txt);
-        if !v.is_empty() {
-            return filter_available(v);
+        if v.is_empty() {
+            default_audio()
+        } else {
+            filter_available(v)
         }
-    }
-    // Nothing configured: one mixed desktop+mic track, the original behaviour.
-    vec![audio()]
+    } else {
+        default_audio()
+    };
+    apply_audio_flags(list)
+}
+
+/// Nothing configured: desktop and mic as two separate tracks rather than one
+/// mixed blob, so the mic toggle has something it can actually remove.
+fn default_audio() -> Vec<String> {
+    vec!["default_output".to_string(), mic_source()]
 }
 
 /// Replay buffer length in seconds.
@@ -138,8 +171,7 @@ pub fn seconds() -> u32 {
 /// Constant bitrate in kbps. Constant (not quality-based) keeps the replay
 /// buffer's RAM usage predictable, which is what you want while gaming.
 ///
-/// 80 Mbps at 1440p60 is roughly what OBS spends (6 Mbps) times ten, i.e. no
-/// visible compression artefacts in a clip. Cost: a 300 s buffer sits in RAM at
+/// 80 Mbps at 1440p60 leaves no visible compression artefacts in a clip. Cost: a 300 s buffer sits in RAM at
 /// about 3 GB, so this number is a RAM dial as much as a quality dial.
 pub fn bitrate_kbps() -> u32 {
     env::var("CLIPPER_GSR_BITRATE")
@@ -187,18 +219,23 @@ pub fn monitor() -> Result<String> {
         .ok_or_else(|| anyhow!("{BIN} reported no monitors"))
 }
 
-/// Where replays land. Defaults to a `gsr` folder next to the OBS clips so
-/// everything ends up in one place.
+/// Where replays land: `CLIPPER_GSR_DIR`, then `gsr_dir.txt`, then
+/// `~/Videos/clips`.
 pub fn output_dir() -> PathBuf {
     if let Ok(d) = env::var("CLIPPER_GSR_DIR") {
         return PathBuf::from(d);
     }
-    match obs_record_dir() {
-        Some(base) => base.join("gsr"),
-        None => dirs::home_dir()
-            .map(|h| h.join("Videos/gsr"))
-            .unwrap_or_else(|| PathBuf::from("/tmp/gsr")),
+    if let Ok(path) = gsr_dir_file()
+        && let Ok(txt) = fs::read_to_string(path)
+    {
+        let t = txt.trim();
+        if !t.is_empty() {
+            return PathBuf::from(t);
+        }
     }
+    dirs::home_dir()
+        .map(|h| h.join("Videos/clips"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/clips"))
 }
 
 /// True when EasyEffects is up and has published its filtered virtual mic.
@@ -217,25 +254,17 @@ fn easyeffects_source_present() -> bool {
 
 /// Which microphone GSR should record.
 ///
-/// EasyEffects does not filter "for OBS"; it publishes a virtual mic
+/// EasyEffects does not filter "for the recorder"; it publishes a virtual mic
 /// (`easyeffects_source`) and every app has to name it. PipeWire's own default
-/// is still the raw hardware mic, which is why GSR was recording unfiltered
-/// audio while OBS was not. Falls back to the raw default when EasyEffects is
-/// absent, because naming a node that does not exist means recording no mic at
-/// all rather than falling back on its own.
+/// is still the raw hardware mic, which is why GSR recorded unfiltered audio
+/// while your apps sounded processed. Falls back to the raw default when
+/// EasyEffects is absent, because naming a node that does not exist means
+/// recording no mic at all rather than falling back on its own.
 pub fn mic_source() -> String {
     if easyeffects_source_present() {
         "easyeffects_source".to_string()
     } else {
         "default_input".to_string()
-    }
-}
-
-/// Audio inputs, pipe-separated: desktop and microphone by default.
-pub fn audio() -> String {
-    match env::var("CLIPPER_GSR_AUDIO") {
-        Ok(v) => v,
-        Err(_) => format!("default_output|{}", mic_source()),
     }
 }
 
@@ -418,10 +447,46 @@ mod tests {
         assert_eq!(SIZE, "0x0");
         assert_eq!(CODEC, "h264");
         // The mic half depends on what is running, so check the shape only.
-        assert!(audio().starts_with("default_output|"));
+        assert_eq!(default_audio()[0], "default_output");
         assert!(matches!(
             mic_source().as_str(),
             "easyeffects_source" | "default_input"
         ));
+    }
+
+    #[test]
+    fn mic_sources_are_told_apart_from_desktop_sound() {
+        assert!(is_mic_source("easyeffects_source"));
+        assert!(is_mic_source("default_input"));
+        assert!(is_mic_source(
+            "alsa_input.pci-0000_09_00.4.analog-stereo",
+        ));
+        assert!(!is_mic_source("default_output"));
+        assert!(!is_mic_source("app:cs2"));
+        assert!(!is_mic_source("app:discord"));
+        // A monitor of an *output* is still desktop sound, despite the name.
+        assert!(!is_mic_source(
+            "alsa_output.pci-0000_09_00.4.analog-stereo.monitor"
+        ));
+    }
+
+    #[test]
+    fn audio_flags_drop_only_the_side_they_control() {
+        let all: Vec<String> = ["app:cs2", "app:discord", "easyeffects_source", "default_output"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        // Both on is the default and drops nothing.
+        assert_eq!(filter_audio(all.clone(), true, true).len(), 4);
+        // Mic off still records the game and Discord.
+        assert_eq!(
+            filter_audio(all.clone(), false, true),
+            vec!["app:cs2", "app:discord", "default_output"]
+        );
+        // Desktop off leaves the mic alone.
+        assert_eq!(filter_audio(all.clone(), true, false), vec!["easyeffects_source"]);
+        // Both off hands gsr no -a flag at all, which is silent video.
+        assert!(filter_audio(all, false, false).is_empty());
     }
 }

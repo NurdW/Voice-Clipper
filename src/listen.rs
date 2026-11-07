@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The always-on listener: mic -> Vosk keyword spotting -> OBS replay save.
+//! The always-on listener: mic -> Vosk keyword spotting -> replay save.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
@@ -9,7 +9,6 @@ use anyhow::Result;
 
 use crate::config::{self, build_grammar, load_phrases};
 use crate::mic::{self, Mic};
-use crate::obs::Obs;
 use crate::state;
 use crate::vosk::{Speech, result_text};
 
@@ -19,7 +18,7 @@ const SAMPLE_RATE: f32 = 16000.0;
 const CHUNK_SAMPLES: usize = 1600;
 /// Don't fire twice in quick succession when Vosk emits the same phrase twice.
 const COOLDOWN: Duration = Duration::from_secs(5);
-/// How often to double-check that OBS's replay buffer is actually running.
+/// How often to double-check that the recorder is actually running.
 const ENSURE_INTERVAL: Duration = Duration::from_secs(30);
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -65,12 +64,11 @@ pub fn run() -> Result<()> {
     let mut muted_logged = false;
 
     while !STOP.load(Ordering::SeqCst) {
-        // OBS does not start the replay buffer by itself unless launched with
-        // --startreplaybuffer, and people launch OBS by clicking an icon. So we
-        // nudge it: every 30s, if OBS is up and the buffer is idle, start it.
+        // gsr only records when something started it, and it can be killed by
+        // anything from a session restart to an OOM. Every 30s we make sure the
+        // recorder you asked to keep alive actually is.
         if last_buffer_check.elapsed() >= ENSURE_INTERVAL {
             last_buffer_check = Instant::now();
-            ensure_replay_buffer();
             ensure_gsr_buffer();
         }
 
@@ -209,22 +207,10 @@ mod tests {
     }
 }
 
-/// Save a clip from whichever recorder is primary.
-///
-/// GPU Screen Recorder wins if it is armed, because the point of running it is
-/// the lower capture overhead — clipping OBS as well would double the files and
-/// the work for no gain. With gsr stopped, OBS is the fallback, which keeps the
-/// phrases working for anyone who never touches the GSR button.
+/// Save a clip from GPU Screen Recorder.
 fn save_clip() -> Result<()> {
-    if crate::gsr::pid().is_some() {
-        crate::gsr::save()?;
-        eprintln!("clipper: gsr clip saved");
-    } else {
-        let settings = config::ObsWsSettings::load()?;
-        let mut obs = Obs::connect(&settings)?;
-        obs.save_replay()?;
-        eprintln!("clipper: clip saved");
-    }
+    crate::gsr::save()?;
+    eprintln!("clipper: gsr clip saved");
     // The clip is already saved; a silent machine is a nuisance, not a failure.
     if let Err(e) = crate::sound::play() {
         eprintln!("clipper: could not play the clip sound: {e:#}");
@@ -233,8 +219,8 @@ fn save_clip() -> Result<()> {
 }
 
 /// Start GPU Screen Recorder if you asked to keep it alive and it is not
-/// running. Unlike OBS there is no "up but idle" state to notice: gsr either
-/// records or it does not, so this is a plain start-if-absent.
+/// running. There is no "up but idle" state to notice: gsr either records or it
+/// does not, so this is a plain start-if-absent.
 fn ensure_gsr_buffer() {
     if !state::gsr_auto_enabled().unwrap_or(false) {
         return;
@@ -245,28 +231,6 @@ fn ensure_gsr_buffer() {
     match crate::gsr::start() {
         Ok(pid) => eprintln!("clipper: started gpu-screen-recorder (pid {pid})"),
         Err(e) => eprintln!("clipper: could not start gpu-screen-recorder: {e:#}"),
-    }
-}
-
-/// Start OBS's replay buffer if OBS is running but the buffer is idle.
-/// Silent when everything is already fine, and silent when OBS is closed —
-/// the listener should not nag the journal while you are not gaming.
-fn ensure_replay_buffer() {
-    // The GUI can tell us to stop nagging: if you turned the buffer off on
-    // purpose, restarting it every 30 seconds is worse than no feature at all.
-    if !state::auto_buffer_enabled().unwrap_or(true) {
-        return;
-    }
-    let Ok(settings) = config::ObsWsSettings::load() else { return };
-    let Ok(mut obs) = Obs::connect(&settings) else { return };
-    match obs.replay_active() {
-        Ok(true) => {}
-        Ok(false) => {
-            if obs.start_replay().is_ok() {
-                eprintln!("clipper: started the OBS replay buffer");
-            }
-        }
-        Err(_) => {}
     }
 }
 

@@ -45,6 +45,10 @@ struct PowerApp {
     /// Which audio sources go on the recording. Both on unless switched off.
     mic_on: bool,
     desktop_on: bool,
+    /// Has this window ever reported focus? Until it has, the focus-based popup
+    /// close stays out of the way: on a setup that never reports focus, acting
+    /// on it would make the menu impossible to open at all.
+    saw_focus: bool,
 }
 
 impl PowerApp {
@@ -61,6 +65,7 @@ impl PowerApp {
             gsr_secs: clipper::gsr::seconds(),
             mic_on: clipper::state::gsr_mic_enabled().unwrap_or(true),
             desktop_on: clipper::state::gsr_desktop_enabled().unwrap_or(true),
+            saw_focus: false,
         }
     }
 
@@ -259,6 +264,8 @@ fn label_width(ui: &mut egui::Ui, label: &str) -> f32 {
 const GLYPH_PAD: f32 = 10.0;
 const GLYPH_W: f32 = 18.0;
 const GLYPH_GAP: f32 = 8.0;
+/// Width of the ▼ button, so the clip row can be centred as a whole.
+const CARET_W: f32 = 22.0;
 
 /// Button width that leaves the label centred just to the right of the glyph.
 fn side_button_width(ui: &mut egui::Ui, label: &str) -> f32 {
@@ -272,7 +279,7 @@ fn side_button_width(ui: &mut egui::Ui, label: &str) -> f32 {
 /// drawn by hand: at this size a drawn shape is the only thing that is
 /// guaranteed to appear.
 fn caret_button(ui: &mut egui::Ui, up: bool) -> egui::Response {
-    let btn = ui.add(egui::Button::new(" ").min_size(Vec2::new(22.0, 34.0)));
+    let btn = ui.add(egui::Button::new(" ").min_size(Vec2::new(CARET_W, 34.0)));
     let c = btn.rect.center();
     let (half_w, half_h) = (6.0, 3.5);
     let tri = if up {
@@ -359,16 +366,32 @@ impl eframe::App for PowerApp {
         }
         ctx.request_repaint_after(POLL);
 
+        // A click on the desktop or on another window never reaches egui, so the
+        // popup's own CloseOnClickOutside cannot see it and the menu would stay
+        // open until you clicked back inside this window. Losing focus is the
+        // signal that you went somewhere else, so treat that as a click outside.
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        if focused {
+            self.saw_focus = true;
+        } else if self.saw_focus {
+            ctx.memory_mut(|m| m.close_popup());
+        }
+
         // Test hook, not a feature: lets a screenshot or a scripted check see
-        // the dropdown open. Nothing sets this variable in normal use.
+        // the dropdown open. Once, not every frame — re-asserting it each frame
+        // would make the popup impossible to close and so untestable.
         if std::env::var("VOICE_CLIPPER_DEBUG_POPUP").is_ok() {
-            ctx.memory_mut(|m| {
-                m.open_popup(egui::Id::new("gsr_menu"));
+            static OPENED_ONCE: std::sync::Once = std::sync::Once::new();
+            OPENED_ONCE.call_once(|| {
+                ctx.memory_mut(|m| m.open_popup(egui::Id::new("gsr_menu")));
             });
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered_justified(|ui| {
+            // Centered, not centered-and-justified: justified stretches every
+            // row to the full window width, which left the clip button hugging
+            // the left edge and made `stop GSR` a full-width bar.
+            ui.vertical_centered(|ui| {
                 ui.add_space(12.0);
 
                 // The clickable area is the disc itself. Allocating a square
@@ -439,6 +462,13 @@ impl eframe::App for PowerApp {
 
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
+                    // A horizontal row expands to the full width, so being
+                    // inside a centered column is not enough to centre it — the
+                    // contents would still start at the left edge. Nudge it by
+                    // half the leftover space instead.
+                    let row_w =
+                        side_button_width(ui, "GSR") + ui.spacing().item_spacing.x + CARET_W;
+                    ui.add_space(((ui.available_width() - row_w) * 0.5).max(0.0));
                     // GPU Screen Recorder: no websocket, just signals. Off means
                     // "start the buffer", on means "save it". The label stays
                     // constant; the clapper colour and the row below carry the
@@ -529,19 +559,22 @@ impl eframe::App for PowerApp {
                             if dcb.changed() {
                                 self.apply_gsr_audio(self.mic_on, desk);
                             }
+                            // Inside the menu rather than a full-width bar under
+                            // the button: it only exists while GSR runs, and
+                            // hanging it off the button keeps the window tidy.
+                            if self.gsr_running {
+                                ui.separator();
+                                let stop = ui.add_sized(
+                                    [ui.available_width(), 20.0],
+                                    egui::widgets::Button::new("stop GSR"),
+                                );
+                                if stop.clicked() {
+                                    self.stop_gsr();
+                                }
+                            }
                         },
                     );
                 });
-
-                if self.gsr_running {
-                    let stop = ui
-                        .small_button("stop GSR")
-                        .on_hover_text("Stop GPU Screen Recorder (the current file is finalised)");
-                    if stop.clicked() {
-                        self.stop_gsr();
-                    }
-                    ui.add_space(2.0);
-                }
 
                 if self.status_age < 6.0 && !self.status.is_empty() {
                     ui.add_space(4.0);

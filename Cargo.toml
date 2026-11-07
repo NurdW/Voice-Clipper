@@ -5,7 +5,7 @@ default-members = [".", "gui"]
 
 [package]
 name = "clipper"
-version = "1.0.1"
+version = "2.0.0"
 license = "GPL-3.0-or-later"
 edition = "2024"
 description = "Voice-triggered game clipping: saves the OBS replay buffer when you say one of your phrases. Fully offline."
@@ -16,17 +16,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 # Only used to install SIGINT/SIGTERM handlers in the listener.
 libc = "0.2"
-serde = { version = "1", features = ["derive"] }
+# Vosk prints one JSON object per recognition; that is all we parse.
 serde_json = "1"
-sha2 = "0.10"
-# Plain (non-TLS) websocket client. OBS binds the websocket to localhost only,
-# so there is no need to pull in a TLS stack for a loopback connection.
-tungstenite = "0.24"
 
 [dev-dependencies]
 tempfile = "3"

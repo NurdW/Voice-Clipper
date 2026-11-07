@@ -169,15 +169,21 @@ pub fn seconds() -> u32 {
 }
 
 /// Constant bitrate in kbps. Constant (not quality-based) keeps the replay
-/// buffer's RAM usage predictable, which is what you want while gaming.
+/// buffer's RAM usage predictable, which is what you want while gaming, and is
+/// what gsr's own man page recommends for a replay buffer.
 ///
-/// 80 Mbps at 1440p60 leaves no visible compression artefacts in a clip. Cost: a 300 s buffer sits in RAM at
-/// about 3 GB, so this number is a RAM dial as much as a quality dial.
+/// 40 Mbps at 1440p60 is about double what YouTube aims at when it re-encodes a
+/// 1440p60 upload (~20 Mbps), and that headroom is the point: their encoder
+/// keeps whatever artefacts the source already has and then spends bits
+/// re-encoding them, so a clean source is strictly better input — but bits
+/// beyond roughly twice their target are discarded on upload anyway. This used
+/// to be 80, which bought nothing measurable. Halving it takes a 3-minute clip
+/// from ~1.7 GB to ~0.9 GB, and the buffer's RAM footprint halves with it.
 pub fn bitrate_kbps() -> u32 {
     env::var("CLIPPER_GSR_BITRATE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(80_000)
+        .unwrap_or(40_000)
 }
 
 /// Frame rate. 60 matches the monitors; pinned rather than left to gsr's own
@@ -442,7 +448,7 @@ mod tests {
     #[test]
     fn defaults_are_sane() {
         // Only meaningful because no CLIPPER_GSR_* var is set during tests.
-        assert_eq!(bitrate_kbps(), 80_000);
+        assert_eq!(bitrate_kbps(), 40_000);
         assert_eq!(fps(), 60);
         assert_eq!(SIZE, "0x0");
         assert_eq!(CODEC, "h264");

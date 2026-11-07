@@ -112,9 +112,20 @@ shortclip 30 /mnt/storage/obs-record/gsr/Replay_2026-11-05_14-34-23.mp4
 The cut is a **stream copy** (no re-encoding), so it takes about a second and
 does not lose quality. Output file gets `-short.mp4` added to the name.
 
-The buffer lives in **RAM**, so length and bitrate are the same dial: 300 s at
-80 Mbps is roughly 3 GB. If you would rather have the space back, lower one of
+The buffer lives in **RAM**, so length and bitrate are the same dial: 180 s at
+40 Mbps is roughly 0.9 GB. If you would rather have the space back, lower one of
 them.
+
+### Why 40 Mbps and not more
+
+Constant bitrate means every clip is the same size whether the scene was busy or
+not, which is what keeps the RAM predictable. 40 Mbps at 1440p60 is about double
+what YouTube targets when it re-encodes a 1440p60 upload (~20 Mbps), and that
+headroom is worth paying for: a re-encode keeps whatever artefacts the source
+already had, then spends bits re-encoding them. Beyond roughly twice their
+target the extra bits are thrown away on upload, which is why this used to be
+80 Mbps for no measurable gain. If you edit locally in DaVinci Resolve rather
+than upload, the same reasoning applies — grading amplifies source artefacts.
 
 ---
 
@@ -250,7 +261,7 @@ Put these in `~/.bashrc`, or in the service file if you want them permanent.
 | `CLIPPER_GSR_MONITOR` | `auto` | which monitor; `auto` picks the first one gsr reports (`DP-1`, `DP-2`, `HDMI-A-1`) |
 | `CLIPPER_GSR_SECONDS` | `300` | how far back the buffer reaches (the ▼ menu writes a state file instead) |
 | `CLIPPER_GSR_DIR` | `gsr_dir.txt`, else `~/Videos/clips` | where replays are written |
-| `CLIPPER_GSR_BITRATE` | `80000` | kilobits/sec, constant bitrate. This is a RAM dial too |
+| `CLIPPER_GSR_BITRATE` | `40000` | kilobits/sec, constant bitrate. This is a RAM dial too: 180 s at 40 Mbps is about 0.9 GB |
 | `CLIPPER_GSR_FPS` | `60` | frame rate |
 | `CLIPPER_GSR_AUDIO` | *(unset)* | overrides the whole audio file as one mixed track; rarely what you want |
 | `VOICE_CLIPPER_POS` | *(unset)* | where the window opens, e.g. `3690,300` for a second monitor |

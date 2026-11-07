@@ -4,7 +4,7 @@ Your PC records the last few minutes of gameplay into RAM all the time, and
 saves it to a file when you say a phrase. Nothing is uploaded anywhere — the
 speech recognition runs on your own machine.
 
-Clips land in: **/mnt/storage/obs-record/gsr/** (named
+Clips land in: **/mnt/storage/recordings-clips/GSR/GSR-clips/** (named
 `Replay_2026-11-05_14-34-23.mp4` — that naming comes from GPU Screen Recorder,
 not from us)
 
@@ -28,7 +28,7 @@ your GPU instead of your CPU, so it costs almost no frames while you play.
    - `chat did you see that`
    - `chat take notes`
 4. About a second later you hear a short **ding**, and the last few minutes are
-   written to a file. Check it: `xdg-open /mnt/storage/obs-record/gsr`
+   written to a file. Check it: `xdg-open /mnt/storage/recordings-clips/GSR/GSR-clips`
 
 That's it. There is no "start recording" step — it is always recording into RAM.
 
@@ -106,7 +106,7 @@ save as usual and cut the tail off the file:
 ```bash
 shortclip                       # cuts the last 30s from the newest clip
 shortclip 60                    # cuts the last 60s
-shortclip 30 /mnt/storage/obs-record/gsr/Replay_2026-11-05_14-34-23.mp4
+shortclip 30 /mnt/storage/recordings-clips/GSR/GSR-clips/Replay_2026-11-05_14-34-23.mp4
 ```
 
 The cut is a **stream copy** (no re-encoding), so it takes about a second and

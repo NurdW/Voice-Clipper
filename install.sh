@@ -54,13 +54,22 @@ install -D -m 644 /tmp/vc512.png "$HOME/.local/share/icons/hicolor/512x512/apps/
 rm -f "$HOME/.local/share/icons/hicolor/scalable/apps/voice-clipper.svg"
 gtk-update-icon-cache -q "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
-echo "== autostart entry (the power-button window) =="
+echo "== window service (the power-button window) =="
 # @HOME@ is substituted here rather than using a desktop field code, because
 # `%h` is not a valid Exec field code and desktop-file-validate rejects it.
 render_desktop() {
     sed "s|@HOME@|$HOME|g" desktop/voice-clipper.desktop
 }
-render_desktop > "$HOME/.config/autostart/voice-clipper.desktop"
+# Plasma autostarts everything in the same second the session begins, while kwin
+# is still coming up. The window needs XWayland, so it died at login with
+# XOpenDisplayFailed and autostart never retried it. A unit with Restart=always
+# waits that race out, and brings the window back if it ever crashes.
+install -m 755 systemd/voice-clipper-start "$BIN/voice-clipper-start"
+install -m 644 systemd/voice-clipper.service "$HOME/.config/systemd/user/voice-clipper.service"
+systemctl --user daemon-reload
+systemctl --user enable --now voice-clipper
+# The old autostart copy would open a second window beside the service's.
+rm -f "$HOME/.config/autostart/voice-clipper.desktop"
 # Same file, also registered as a launcher so Plasma can match the window to an
 # application (WM_CLASS=voice-clipper -> StartupWMClass), which is what puts it
 # in the taskbar.
@@ -79,7 +88,7 @@ echo "            systemctl --user status clipper"
 echo "            journalctl --user -u clipper -f"
 echo
 echo "To undo all of this:"
-echo "  systemctl --user disable --now clipper"
-echo "  rm ~/.config/systemd/user/clipper.service ~/.config/autostart/clipgui.desktop"
-echo "  rm ~/.local/bin/clipctl ~/.local/bin/voice-clipper"
+echo "  systemctl --user disable --now clipper voice-clipper"
+echo "  rm ~/.config/systemd/user/clipper.service ~/.config/systemd/user/voice-clipper.service"
+echo "  rm ~/.local/bin/clipctl ~/.local/bin/voice-clipper ~/.local/bin/clipper-listen ~/.local/bin/voice-clipper-start"
 echo "  systemctl --user daemon-reload"

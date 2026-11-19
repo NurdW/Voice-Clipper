@@ -10,7 +10,7 @@ use anyhow::Result;
 use crate::config::{self, build_grammar, load_phrases};
 use crate::mic::{self, Mic};
 use crate::state;
-use crate::vosk::{Speech, result_text};
+use crate::vosk::{Speech, result_conf, result_text};
 
 const SAMPLE_RATE: f32 = 16000.0;
 /// 100 ms of mono 16-bit audio. Small enough that a clip trigger lands within
@@ -104,16 +104,29 @@ pub fn run() -> Result<()> {
             continue;
         }
 
-        let text = result_text(&speech.result());
+        let res = speech.result();
+        // The raw JSON is the only way to find out what Vosk actually reports:
+        // a grammar-restricted recognizer may omit `conf` entirely, and no
+        // amount of reading the docs settles it for this build.
+        if std::env::var_os("CLIPPER_DEBUG_JSON").is_some() {
+            eprintln!("clipper: raw {res}");
+        }
+        let text = result_text(&res);
         if text.is_empty() {
             continue;
         }
-        eprintln!("clipper: heard \"{text}\"");
+        // Confidence is logged even though nothing acts on it yet: a restricted
+        // grammar promotes room noise into real-looking phrases, and the only
+        // way to pick a sane floor is to see what the model actually reports.
+        match result_conf(&res) {
+            Some(c) => eprintln!("clipper: heard \"{text}\" (conf {c:.2})"),
+            None => eprintln!("clipper: heard \"{text}\""),
+        }
 
         if last_fire.elapsed() < COOLDOWN {
             continue;
         }
-        if let Some(hit) = phrases.iter().find(|p| phrase_in(&text, p)) {
+        if let Some(hit) = phrases.iter().find(|p| phrase_is_whole_utterance(&text, p)) {
             last_fire = Instant::now();
             eprintln!("clipper: phrase \"{hit}\" matched → saving clip");
             if let Err(e) = save_clip() {
@@ -126,84 +139,91 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// True when `phrase` appears in `text` as a run of whole words, in order.
+/// True when `text` is the phrase and nothing else: same words, same order, no
+/// extra words on either side.
+///
+/// **No wildcards, no padding.** Every word must be recognised exactly, *and*
+/// Vosk must have heard nothing else in that utterance. Two earlier versions
+/// were looser: one let `[unk]` stand in for the wake word, the next allowed the
+/// phrase to sit anywhere inside a longer transcript. Both tolerated too much.
+/// A restricted grammar actively promotes room noise into real-looking phrases,
+/// and the journal line `[unk] [unk] chat clip that [unk]` saved a clip that
+/// nobody asked for. Requiring the whole utterance is the difference between a
+/// command and a coincidence.
 ///
 /// Word-level (not substring) so "clip that" does not fire on "unclip thatx".
 ///
-/// **No wildcards.** Every word of the phrase must be recognised, exactly. A
-/// previous version let `[unk]` stand in for the wake word, on the theory that
-/// the small model reliably muffles "chat"; in practice that tolerance mostly
-/// fired on noise, so it is gone. The trade is deliberate: more missed triggers
-/// when you mumble, no clips you did not ask for.
-///
-/// Note this makes the matcher strict about what Vosk emits, not about how you
-/// speak — "chat clip that" said clearly but transcribed as "chat clip that's"
-/// will not fire either.
-fn phrase_in(text: &str, phrase: &str) -> bool {
+/// The trade is deliberate and it does cost misses: a clean "chat clip that"
+/// wrapped in a cough (`[unk] chat clip that`) will not fire. Say the phrase on
+/// its own, as a separate breath.
+fn phrase_is_whole_utterance(text: &str, phrase: &str) -> bool {
     let t: Vec<&str> = text.split_whitespace().collect();
     let p: Vec<&str> = phrase.split_whitespace().collect();
-    if p.is_empty() || t.len() < p.len() {
-        return false;
-    }
-    t.windows(p.len())
-        .any(|window| window.iter().zip(&p).all(|(tw, pw)| *tw == *pw))
+    !p.is_empty() && t.len() == p.len() && t.iter().zip(&p).all(|(tw, pw)| *tw == *pw)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::phrase_in;
+    use super::phrase_is_whole_utterance as whole;
+
+    #[test]
+    fn the_phrase_must_be_the_whole_utterance() {
+        assert!(whole("chat clip that", "chat clip that"));
+        // A real journal line that saved a clip nobody asked for: the words were
+        // all there, with noise on both sides of them.
+        assert!(!whole("[unk] [unk] chat clip that [unk]", "chat clip that"));
+        assert!(!whole("alright chat clip that", "chat clip that"));
+        assert!(!whole("chat clip that now", "chat clip that"));
+        assert!(!whole("clip", "chat clip that"));
+        assert!(!whole("", "chat clip that"));
+    }
 
     #[test]
     fn matches_whole_word_runs_only() {
-        assert!(phrase_in("clip that", "clip that"));
-        assert!(phrase_in("alright chat clip that now", "clip that"));
-        assert!(phrase_in("hey jarvis clip that", "clip that"));
-        assert!(!phrase_in("clip", "clip that"));
-        assert!(!phrase_in("that clip", "clip that"));
-        assert!(!phrase_in("", "clip that"));
+        assert!(whole("clip that", "clip that"));
+        assert!(!whole("clip", "clip that"));
+        assert!(!whole("that clip", "clip that"));
+        assert!(!whole("", "clip that"));
     }
 
     #[test]
     fn multiword_phrase_needs_all_words_in_order() {
-        assert!(phrase_in("hey jarvis clip that", "hey jarvis clip that"));
-        assert!(!phrase_in("jarvis hey clip that", "hey jarvis clip that"));
+        assert!(whole("hey jarvis clip that", "hey jarvis clip that"));
+        assert!(!whole("jarvis hey clip that", "hey jarvis clip that"));
     }
 
     #[test]
     fn no_wildcard_is_tolerated() {
         // Every word must be heard. These are real journal lines that used to
         // save clips with a word missing.
-        assert!(phrase_in("chat clip that", "chat clip that"));
-        assert!(phrase_in("hey chat clip that", "chat clip that"));
-        assert!(!phrase_in("[unk] clip that", "chat clip that"));
-        assert!(!phrase_in("chat clip [unk]", "chat clip that"));
-        assert!(!phrase_in("chat did you [unk] that", "chat did you see that"));
-        assert!(!phrase_in("take chat take [unk]", "chat take notes"));
-        assert!(!phrase_in("chat take [unk]", "chat take notes"));
-        assert!(!phrase_in("[unk] [unk] take notes [unk]", "chat take notes"));
+        assert!(whole("chat clip that", "chat clip that"));
+        assert!(!whole("[unk] clip that", "chat clip that"));
+        assert!(!whole("chat clip [unk]", "chat clip that"));
+        assert!(!whole("chat did you [unk] that", "chat did you see that"));
+        assert!(!whole("chat take [unk]", "chat take notes"));
+        assert!(!whole("[unk] [unk] take notes [unk]", "chat take notes"));
     }
 
     #[test]
     fn a_missing_wake_word_does_not_fire() {
         // No [unk] at all means nothing was heard in the wake-word position, so
         // the bare phrase must not trigger — that is what the wake word is for.
-        assert!(!phrase_in("clip that", "chat clip that"));
-        assert!(!phrase_in("alright clip that now", "chat clip that"));
-        assert!(!phrase_in("take notes", "chat take notes"));
+        assert!(!whole("clip that", "chat clip that"));
+        assert!(!whole("take notes", "chat take notes"));
     }
 
     #[test]
     fn all_unk_is_not_a_match() {
         // Otherwise every burst of background noise would match every phrase.
-        assert!(!phrase_in("[unk] [unk] [unk]", "chat clip that"));
-        assert!(!phrase_in("[unk] [unk] [unk] [unk]", "chat did you see that"));
+        assert!(!whole("[unk] [unk] [unk]", "chat clip that"));
+        assert!(!whole("[unk] [unk] [unk] [unk]", "chat did you see that"));
     }
 
     #[test]
     fn single_word_phrases_need_an_exact_word() {
-        assert!(phrase_in("reddit", "reddit"));
-        assert!(phrase_in("go reddit now", "reddit"));
-        assert!(!phrase_in("[unk]", "reddit"));
+        assert!(whole("reddit", "reddit"));
+        assert!(!whole("go reddit now", "reddit"));
+        assert!(!whole("[unk]", "reddit"));
     }
 }
 
@@ -277,7 +297,7 @@ pub fn hear(path: &str) -> Result<()> {
                 continue;
             }
             heard_any = true;
-            let hit = phrases.iter().find(|p| phrase_in(&text, p));
+            let hit = phrases.iter().find(|p| phrase_is_whole_utterance(&text, p));
             println!("heard: {text}{}", hit.map(|h| format!("   → MATCH \"{h}\"")).unwrap_or_default());
             if let Some(h) = hit {
                 matched.push(h.clone());
@@ -289,7 +309,7 @@ pub fn hear(path: &str) -> Result<()> {
     let tail = result_text(&speech.final_result());
     if !tail.is_empty() {
         heard_any = true;
-        let hit = phrases.iter().find(|p| phrase_in(&tail, p));
+        let hit = phrases.iter().find(|p| phrase_is_whole_utterance(&tail, p));
         println!("heard: {tail}{}", hit.map(|h| format!("   → MATCH \"{h}\"")).unwrap_or_default());
         if let Some(h) = hit {
             matched.push(h.clone());

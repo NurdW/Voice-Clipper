@@ -17,3 +17,6 @@
 # Python bytecode from the dev probe scripts
 __pycache__/
 *.pyc
+
+# Machine-specific backups; they hold absolute paths with the username.
+desktop/*.bak

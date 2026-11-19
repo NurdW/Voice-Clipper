@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# voice-clipper-start — launch the window with the environment it expects.
+#
+# Why a script instead of a plain Exec= line: the window is deliberately started
+# under X11 (XWayland) so Plasma gives it a taskbar entry — eframe never passes
+# an app id, so on Wayland the window has none and the task manager skips it.
+# That means WAYLAND_DISPLAY has to be *removed*, and a unit file can only set
+# variables, never unset them.
+set -u
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+unset WAYLAND_DISPLAY
+export DISPLAY="${DISPLAY:-:0}"
+
+exec "$here/voice-clipper"

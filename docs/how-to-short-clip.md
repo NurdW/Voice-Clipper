@@ -143,10 +143,12 @@ Then restart the listener so it picks up the change:
 systemctl --user restart clipper
 ```
 
-**Every word must be heard exactly.** There is no forgiveness for a muffled
-word: say "chat clip that" and Vosk must transcribe "chat clip that", all four
-words. Words it doesn't know (made-up slang, some game names) get folded into
-`[unk]` and will never match, so plain English words work best. Expect to
+**Every word must be heard exactly, and nothing else.** There is no forgiveness
+for a muffled word: say "chat clip that" and Vosk must transcribe "chat clip
+that", all four words, with nothing before or after them in that utterance. Words
+it doesn't know (made-up slang, some game names) get folded into `[unk]` and will
+never match, so plain English words work best. A cough right before the phrase can
+eat the trigger, so say it as its own breath rather than mid-sentence. Expect to
 over-enunciate slightly at first; a missed trigger is the price of no phantom
 clips.
 

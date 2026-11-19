@@ -153,9 +153,31 @@ pub fn result_text(json_line: &str) -> String {
     v["text"].as_str().unwrap_or("").to_string()
 }
 
+/// Vosk's own confidence in a result, 0.0..=1.0.
+///
+/// `None` when the JSON carries no score: partial results and empty results
+/// omit `conf` entirely, so "no score" must never be read as "zero confidence".
+///
+/// Worth logging because a restricted grammar *forces* ambiguous audio into the
+/// few phrases it allows, which turns room noise into a real-looking trigger.
+/// The score is the only signal that separates a confident "chat clip that" from
+/// a guess.
+pub fn result_conf(json_line: &str) -> Option<f32> {
+    let v = serde_json::from_str::<serde_json::Value>(json_line).ok()?;
+    v["conf"].as_f64().map(|c| c as f32)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::result_text;
+    use super::{result_conf, result_text};
+
+    #[test]
+    fn reads_confidence_and_treats_a_missing_score_as_none() {
+        assert_eq!(result_conf("{\"text\": \"x\", \"conf\": 0.83}"), Some(0.83_f32));
+        // Partial and empty results have no conf; that is not the same as 0.0.
+        assert_eq!(result_conf("{\"text\": \"\", \"emitted\": \"partial\"}"), None);
+        assert_eq!(result_conf("not json"), None);
+    }
 
     #[test]
     fn extracts_text_field() {

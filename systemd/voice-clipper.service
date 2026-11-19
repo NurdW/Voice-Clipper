@@ -1,0 +1,30 @@
+# Voice Clipper window.
+#
+# A *user* service: it needs your Plasma session and your PipeWire bus, so it
+# runs as you, not as root. This replaces the ~/.config/autostart entry, which
+# could not survive the boot race described below.
+#
+#   systemctl --user {start,stop,restart,status} voice-clipper
+#   journalctl --user -u voice-clipper -f
+[Unit]
+Description=Voice Clipper — power button and clip button window
+Documentation=file://%h/slopbot/general/clipper/docs/how-to-short-clip.md
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/voice-clipper-start
+# The window talks to XWayland, and at login everything in the session starts in
+# the same second while kwin is still coming up — so the first attempts die with
+# XOpenDisplayFailed and Plasma's autostart simply gives up. Restarting until one
+# lands beats guessing a delay, and it also brings the window back if it ever
+# crashes.
+Restart=always
+RestartSec=5
+# Second monitor starts at x=2560 on this machine. egui cannot read monitor
+# geometry, so the position is passed in; a wrong value just opens off-screen.
+Environment=VOICE_CLIPPER_POS=3690,300
+
+[Install]
+WantedBy=default.target

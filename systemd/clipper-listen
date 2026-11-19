@@ -26,16 +26,31 @@ if [ -z "${WAYLAND_DISPLAY:-}" ]; then
     # Newest first, but do not trust it: this machine has had wayland-1 and
     # wayland-2 sockets present at once, and the newer one is not necessarily the
     # live compositor. Ask gsr which one it can actually see monitors through.
-    for socket in $(ls -1t "$runtime"/wayland-* 2>/dev/null); do
-        [ -S "$socket" ] || continue
-        candidate="${socket##*/}"
-        if WAYLAND_DISPLAY="$candidate" XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-KDE}" \
-             timeout 10 gpu-screen-recorder --list-monitors 2>/dev/null | grep -q '|'; then
-            export WAYLAND_DISPLAY="$candidate"
-            echo "clipper: no WAYLAND_DISPLAY inherited; using $WAYLAND_DISPLAY (verified)"
-            break
+    #
+    # And keep asking. At login the user manager starts everything in the same
+    # second, while kwin is still coming up: the sockets exist but nothing answers
+    # yet. Probing once meant "no monitors" forever, because the listener's own
+    # retry loop never re-resolves the environment it was handed.
+    deadline=$((SECONDS + ${CLIPPER_DISPLAY_WAIT:-120}))
+    while [ -z "${WAYLAND_DISPLAY:-}" ] && [ "$SECONDS" -lt "$deadline" ]; do
+        for socket in $(ls -1t "$runtime"/wayland-* 2>/dev/null); do
+            [ -S "$socket" ] || continue
+            candidate="${socket##*/}"
+            if WAYLAND_DISPLAY="$candidate" XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-KDE}" \
+                 timeout 10 gpu-screen-recorder --list-monitors 2>/dev/null | grep -q '|'; then
+                export WAYLAND_DISPLAY="$candidate"
+                echo "clipper: no WAYLAND_DISPLAY inherited; using $WAYLAND_DISPLAY (verified)"
+                break
+            fi
+        done
+        if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+            echo "clipper: compositor not answering yet, retrying in 3s"
+            sleep 3
         fi
     done
+    if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+        echo "clipper: no Wayland socket answered within $((deadline))s; gsr will keep retrying on its own"
+    fi
 fi
 
 # gsr wants these to find the screen to capture; harmless defaults if unset.

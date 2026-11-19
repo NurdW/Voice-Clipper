@@ -119,6 +119,39 @@ pub fn apply_audio_flags(list: Vec<String>) -> Vec<String> {
     )
 }
 
+/// Sources that already carry everything of their kind.
+///
+/// `app:*` is excluded on purpose: `default_output` already contains those apps,
+/// so putting both into one mix would play the game audio twice at double level.
+fn mix_components(list: &[String]) -> Vec<String> {
+    list.iter()
+        .filter(|s| !s.starts_with("app:") && !s.contains('|'))
+        .cloned()
+        .collect()
+}
+
+/// Put one mixed track first, so a clip sounds complete wherever you open it.
+///
+/// A video player plays only the *first* audio track. On a multitrack file whose
+/// track 1 is the microphone, every clip you double-click is an empty room with
+/// breathing in it — which is what "there's no game audio in my clips" turned out
+/// to be. gsr mixes sources written with `|` into a single stream, so track 1
+/// becomes speakers + mic and the separate tracks follow it for editing.
+///
+/// Built from the list *after* the mic/desktop toggles are applied, so the mix
+/// can never smuggle back in a source you switched off. With one or zero sources
+/// left there is nothing to mix and the list is returned untouched.
+pub fn with_mix_track(list: Vec<String>) -> Vec<String> {
+    let parts = mix_components(&list);
+    if parts.len() < 2 {
+        return list;
+    }
+    let mut out = Vec::with_capacity(list.len() + 1);
+    out.push(parts.join("|"));
+    out.extend(list);
+    out
+}
+
 /// Audio sources, one `-a` each, so every source lands on its own track.
 ///
 /// gsr joins sources written with `|` into ONE mixed track, but a separate `-a`
@@ -147,7 +180,7 @@ pub fn audio_list() -> Vec<String> {
     } else {
         default_audio()
     };
-    apply_audio_flags(list)
+    with_mix_track(apply_audio_flags(list))
 }
 
 /// Nothing configured: desktop and mic as two separate tracks rather than one
@@ -494,5 +527,35 @@ mod tests {
         assert_eq!(filter_audio(all.clone(), true, false), vec!["easyeffects_source"]);
         // Both off hands gsr no -a flag at all, which is silent video.
         assert!(filter_audio(all, false, false).is_empty());
+    }
+
+    #[test]
+    fn mix_track_goes_first_and_holds_the_device_sources() {
+        let list = vec![
+            "easyeffects_source".to_string(),
+            "app:cs2".to_string(),
+            "default_output".to_string(),
+        ];
+        let out = with_mix_track(list);
+        assert_eq!(out[0], "easyeffects_source|default_output");
+        // The separate tracks survive untouched, right after the mix.
+        assert_eq!(
+            &out[1..],
+            &["easyeffects_source", "app:cs2", "default_output"]
+        );
+    }
+
+    #[test]
+    fn mix_track_leaves_app_sources_out_because_default_output_has_them_already() {
+        // Mixing app:cs2 in with default_output would play the game twice.
+        let list = vec!["app:cs2".to_string(), "app:discord".to_string()];
+        assert_eq!(with_mix_track(list.clone()), list);
+    }
+
+    #[test]
+    fn mix_track_is_skipped_when_a_toggle_left_only_one_source() {
+        // A "mix" of one source would just duplicate it as a second track.
+        let one = vec!["default_output".to_string()];
+        assert_eq!(with_mix_track(one.clone()), one);
     }
 }

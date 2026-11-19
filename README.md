@@ -106,13 +106,18 @@ ffmpeg -nostdin -loglevel error -y -sseof -20 -i Clip.mp4 -vn -ac 1 -ar 16000 /t
 transcribe /tmp/t.wav
 ```
 
-An energy or confidence floor would stop this; deliberately not implemented —
-the wake-word rule shipped instead and the behaviour is being watched.
+**A confidence floor is not available.** With a restricted grammar Vosk returns
+`{"text": "..."}` and nothing else — no `conf` field — so there is no score to
+threshold. Verified by logging the raw JSON (`CLIPPER_DEBUG_JSON=1`).
 
-**Phrase matching is exact, with no wildcards.** Every word has to be heard.
-`[unk]` in the recognised text never matches, which is why a partial
-`[unk] chat clip that` is rejected. That trades missed triggers for zero
-phantom clips, which is the right way round when a false clip costs you 300 MB.
+**Phrase matching is exact, with no wildcards and no padding.** Every word has to
+be heard, and Vosk must have heard *nothing else* in that utterance. `[unk]`
+never matches, and neither `[unk] chat clip that` nor `chat clip that [unk]`
+fires — the phrase has to be the whole thing. Replaying a week of real journal
+lines through both rules: 14 triggers became 3, and the 11 that disappeared all
+had noise on one side or the other. Say the phrase as its own breath. That trades
+missed triggers for zero phantom clips, which is the right way round when a false
+clip costs you 300 MB.
 
 **`pw-record` to stdout needs `--raw`.** Without it pw-record writes a 24-byte
 Sun AU header (`.snd`) to stdout, shifting the whole PCM stream so every sample

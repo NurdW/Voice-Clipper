@@ -188,10 +188,20 @@ before installing; this cost an hour of debugging a change that was correct.
 
 ## Mute design
 
-`~/.local/state/clipper/muted` existing == muted. The listener stats that file
-about twice a second. That means the GUI, `clipctl toggle`, and a keyboard
-shortcut can all flip it without any IPC, and the listener still drains the mic
-pipe while muted so PipeWire never backs up.
+The listener checks `~/.local/state/clipper/muted` before passing each 100 ms
+chunk to Vosk. If the flag exists or its state cannot be read, it drains and
+discards mic audio. Entering mute clears any partial utterance. On unmute the
+listener reopens its capture stream so no queued audio from the old pipe is
+recognized. The GUI, `clipctl toggle`, and keyboard shortcuts can all change
+the flag without IPC.
+This does not mute the microphone track in the recorder.
+
+The recorder applies its own mic and desktop switches at startup, before making
+the mixed track. For named devices it reads `pactl --format=json list sources`
+to distinguish capture inputs from playback monitors, including custom names.
+When either switch is off it omits devices it cannot identify. `default_input`,
+`default_output`, `app:`, and `app-inverse:` selectors do not need device
+metadata.
 
 Every other toggle (keep-alive, microphone, desktop audio) uses the same trick
 for the same reason: no IPC, no protocol, and the state survives a restart of

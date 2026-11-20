@@ -13,7 +13,7 @@ use anyhow::Result;
 use crate::config::{self, muted_flag};
 
 pub fn is_muted() -> Result<bool> {
-    Ok(muted_flag()?.exists())
+    Ok(muted_flag()?.try_exists()?)
 }
 
 pub fn set_muted(muted: bool) -> Result<()> {
@@ -38,7 +38,7 @@ pub fn toggle() -> Result<bool> {
 /// Whether the microphone goes on the recording. On unless you turn it off,
 /// so the flag file records the exception and the default needs no file.
 pub fn gsr_mic_enabled() -> Result<bool> {
-    Ok(!config::gsr_no_mic_flag()?.exists())
+    Ok(!config::gsr_no_mic_flag()?.try_exists()?)
 }
 
 pub fn set_gsr_mic(on: bool) -> Result<()> {
@@ -58,7 +58,7 @@ pub fn set_gsr_mic(on: bool) -> Result<()> {
 
 /// Whether desktop and game audio goes on the recording.
 pub fn gsr_desktop_enabled() -> Result<bool> {
-    Ok(!config::gsr_no_desktop_flag()?.exists())
+    Ok(!config::gsr_no_desktop_flag()?.try_exists()?)
 }
 
 pub fn set_gsr_desktop(on: bool) -> Result<()> {

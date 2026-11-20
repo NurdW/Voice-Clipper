@@ -9,12 +9,13 @@
 //! Settings come from the environment (CLIPPER_GSR_*) when set, otherwise from
 //! the state and config files this crate owns.
 
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::config::gsr_dir_file;
 
@@ -50,30 +51,28 @@ fn known_audio_devices() -> Vec<String> {
 /// 30 seconds and nothing ever recorded. `app:` names are exempt because gsr
 /// tolerates an app that is not running (it makes a silent track); a missing
 /// *device* is fatal.
-fn filter_available(sources: Vec<String>) -> Vec<String> {
+fn filter_available(sources: Vec<String>, roles: &DeviceRoles) -> Vec<String> {
     let known = known_audio_devices();
     // Empty means the probe itself failed; better to pass the list through
     // unchanged than to silently record nothing.
     if known.is_empty() {
         return sources;
     }
-    let mut kept: Vec<String> = Vec::new();
-    for s in sources {
-        let ok = s.starts_with("app:")
-            || s == "default_output"
-            || s == "default_input"
-            || known.iter().any(|k| k == &s);
-        if ok {
-            kept.push(s);
-        } else {
+    let mut kept = retain_components(sources, |s| {
+        let name = device_name(s);
+        let ok = is_app_selector(s)
+            || matches!(s, "default_output" | "default_input")
+            || known.iter().any(|k| device_name(k) == name);
+        if !ok {
             eprintln!("clipper: skipping audio source '{s}' (not present right now)");
         }
-    }
-    // Never lose the microphone: if everything mic-shaped was dropped, fall back
-    // to the raw default input.
+        ok
+    });
+    // An unclassified source could already be a microphone; don't add another.
     let has_mic = kept
         .iter()
-        .any(|s| s.contains("input") || s.contains("easyeffects") || s.contains("mic"));
+        .flat_map(|s| s.split('|'))
+        .any(|s| source_role(s, roles) != Some(AudioRole::Desktop));
     if !has_mic {
         eprintln!("clipper: no microphone source available, using default_input");
         kept.insert(0, "default_input".to_string());
@@ -92,40 +91,122 @@ fn parse_audio_list(txt: &str) -> Vec<String> {
         .collect()
 }
 
-/// Is this source the microphone (as opposed to game and app sound)?
-///
-/// `easyeffects_source` is a virtual device with no "input" in its name, so it
-/// has to be named; everything else that captures follows PipeWire's
-/// `alsa_input.*` / `default_input` naming.
-pub fn is_mic_source(source: &str) -> bool {
-    source == "easyeffects_source" || source.contains("input")
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AudioRole {
+    Mic,
+    Desktop,
 }
 
-/// Drop the sources the user switched off. Split out from `apply_audio_flags`
-/// so it can be tested without touching the real flag files.
-fn filter_audio(list: Vec<String>, mic: bool, desktop: bool) -> Vec<String> {
-    list.into_iter()
-        .filter(|s| if is_mic_source(s) { mic } else { desktop })
+type DeviceRoles = HashMap<String, AudioRole>;
+
+fn parse_device_roles(json: &[u8]) -> DeviceRoles {
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(json).unwrap_or_default();
+    rows.iter()
+        .filter_map(|row| {
+            let name = row["name"].as_str()?;
+            // In `pactl --format=json list sources`, monitor_source is the name of
+            // the sink this source monitors. A capture input has an empty string.
+            let sink = row["monitor_source"].as_str()?;
+            let role = if sink.is_empty() {
+                AudioRole::Mic
+            } else {
+                AudioRole::Desktop
+            };
+            Some((name.to_owned(), role))
+        })
         .collect()
 }
 
-/// Both flags default to on, so with no flag files this returns the list
-/// untouched.
-pub fn apply_audio_flags(list: Vec<String>) -> Vec<String> {
+fn device_roles() -> DeviceRoles {
+    Command::new("pactl")
+        .args(["--format=json", "list", "sources"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| parse_device_roles(&out.stdout))
+        .unwrap_or_default()
+}
+
+fn is_app_selector(source: &str) -> bool {
+    source.starts_with("app:") || source.starts_with("app-inverse:")
+}
+
+fn device_name(source: &str) -> &str {
+    source.strip_prefix("device:").unwrap_or(source)
+}
+
+fn source_role(source: &str, roles: &DeviceRoles) -> Option<AudioRole> {
+    match source {
+        "default_input" => Some(AudioRole::Mic),
+        "default_output" => Some(AudioRole::Desktop),
+        s if is_app_selector(s) => Some(AudioRole::Desktop),
+        s => roles.get(device_name(s)).copied(),
+    }
+}
+
+/// Does the track contain an identified capture input? Unknown is not proof of desktop audio.
+pub fn is_mic_source(source: &str) -> bool {
+    let roles = device_roles();
+    source
+        .split('|')
+        .any(|s| source_role(s.trim(), &roles) == Some(AudioRole::Mic))
+}
+
+/// GSR interprets `|` inside a track as a mix. Always filter its components,
+/// even when the first one is a trusted selector such as `app:game`.
+fn retain_components(tracks: Vec<String>, keep: impl Fn(&str) -> bool) -> Vec<String> {
+    tracks
+        .into_iter()
+        .filter_map(|track| {
+            let parts: Vec<_> = track
+                .split('|')
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && keep(s))
+                .collect();
+            (!parts.is_empty()).then(|| parts.join("|"))
+        })
+        .collect()
+}
+
+fn filter_audio(list: Vec<String>, mic: bool, desktop: bool, roles: &DeviceRoles) -> Vec<String> {
+    match (mic, desktop) {
+        (true, true) => list,
+        (false, false) => Vec::new(),
+        _ => retain_components(list, |source| match source_role(source, roles) {
+            Some(AudioRole::Mic) => mic,
+            Some(AudioRole::Desktop) => desktop,
+            None => {
+                eprintln!(
+                    "clipper: skipping '{source}' (unknown role while an audio switch is off)"
+                );
+                false
+            }
+        }),
+    }
+}
+
+fn configured_audio(list: Vec<String>, roles: &DeviceRoles) -> Vec<String> {
     filter_audio(
         list,
-        crate::state::gsr_mic_enabled().unwrap_or(true),
-        crate::state::gsr_desktop_enabled().unwrap_or(true),
+        crate::state::gsr_mic_enabled().unwrap_or(false),
+        crate::state::gsr_desktop_enabled().unwrap_or(false),
+        roles,
     )
+}
+
+/// Missing switch files mean on; an unreadable switch disables its audio.
+pub fn apply_audio_flags(list: Vec<String>) -> Vec<String> {
+    configured_audio(list, &device_roles())
 }
 
 /// Sources that already carry everything of their kind.
 ///
-/// `app:*` is excluded on purpose: `default_output` already contains those apps,
-/// so putting both into one mix would play the game audio twice at double level.
+/// App selectors are excluded: `default_output` already contains those apps.
+/// Keep only the first instance of a device in the generated mix.
 fn mix_components(list: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
     list.iter()
-        .filter(|s| !s.starts_with("app:") && !s.contains('|'))
+        .filter(|s| !is_app_selector(s) && !s.contains('|') && seen.insert(device_name(s)))
         .cloned()
         .collect()
 }
@@ -163,6 +244,7 @@ pub fn with_mix_track(list: Vec<String>) -> Vec<String> {
 /// The list is read from `~/.config/clipper/gsr_audio.txt`, one source per
 /// line, `#` for comments. `CLIPPER_GSR_AUDIO` still wins for a one-off.
 pub fn audio_list() -> Vec<String> {
+    let roles = device_roles();
     let list = if let Ok(v) = env::var("CLIPPER_GSR_AUDIO") {
         v.split('|')
             .map(|s| s.trim().to_string())
@@ -175,12 +257,12 @@ pub fn audio_list() -> Vec<String> {
         if v.is_empty() {
             default_audio()
         } else {
-            filter_available(v)
+            filter_available(v, &roles)
         }
     } else {
         default_audio()
     };
-    with_mix_track(apply_audio_flags(list))
+    with_mix_track(configured_audio(list, &roles))
 }
 
 /// Nothing configured: desktop and mic as two separate tracks rather than one
@@ -195,7 +277,10 @@ fn default_audio() -> Vec<String> {
 /// GUI (a state file), then 300. The GUI writes the state file; the env var
 /// exists so a shell or a systemd drop-in can still override everything.
 pub fn seconds() -> u32 {
-    if let Some(v) = env::var("CLIPPER_GSR_SECONDS").ok().and_then(|s| s.parse().ok()) {
+    if let Some(v) = env::var("CLIPPER_GSR_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         return v;
     }
     crate::state::gsr_seconds().unwrap_or(300)
@@ -435,7 +520,10 @@ pub fn start() -> Result<u32> {
 /// One-line description of the current recorder state, for status output.
 pub fn status_line() -> String {
     match pid() {
-        Some(p) => format!("gpu-screen-recorder running (pid {p}), {}s buffer", seconds()),
+        Some(p) => format!(
+            "gpu-screen-recorder running (pid {p}), {}s buffer",
+            seconds()
+        ),
         None => "gpu-screen-recorder not running".to_string(),
     }
 }
@@ -471,7 +559,9 @@ mod tests {
 
     #[test]
     fn cmdline_match_needs_the_exact_binary_name() {
-        assert!(cmdline_is_gsr(b"gpu-screen-recorder\0-w\0DP-1\0".as_slice()));
+        assert!(cmdline_is_gsr(
+            b"gpu-screen-recorder\0-w\0DP-1\0".as_slice()
+        ));
         // A grep, or the gtk front-end, must not be mistaken for the recorder.
         assert!(!cmdline_is_gsr(b"grep\0gpu-screen-recorder\0".as_slice()));
         assert!(!cmdline_is_gsr(b"gpu-screen-recorder-gtk\0".as_slice()));
@@ -493,40 +583,156 @@ mod tests {
         ));
     }
 
+    fn device_fixture() -> DeviceRoles {
+        parse_device_roles(
+            br#"[
+            {"name":"studio_mic", "monitor_source":""},
+            {"name":"easyeffects_source", "monitor_source":""},
+            {"name":"headset.monitor", "monitor_source":""},
+            {"name":"custom_input_return", "monitor_source":"speakers"},
+            {"name":"missing_field"}
+        ]"#,
+        )
+    }
+
     #[test]
     fn mic_sources_are_told_apart_from_desktop_sound() {
-        assert!(is_mic_source("easyeffects_source"));
-        assert!(is_mic_source("default_input"));
-        assert!(is_mic_source(
-            "alsa_input.pci-0000_09_00.4.analog-stereo",
-        ));
-        assert!(!is_mic_source("default_output"));
-        assert!(!is_mic_source("app:cs2"));
-        assert!(!is_mic_source("app:discord"));
-        // A monitor of an *output* is still desktop sound, despite the name.
-        assert!(!is_mic_source(
-            "alsa_output.pci-0000_09_00.4.analog-stereo.monitor"
-        ));
+        let roles = device_fixture();
+        for mic in [
+            "easyeffects_source",
+            "default_input",
+            "studio_mic",
+            "headset.monitor",
+        ] {
+            assert_eq!(source_role(mic, &roles), Some(AudioRole::Mic));
+        }
+        for output in ["default_output", "app:cs2", "custom_input_return"] {
+            assert_eq!(source_role(output, &roles), Some(AudioRole::Desktop));
+        }
+        assert_eq!(source_role("missing_field", &roles), None);
     }
 
     #[test]
     fn audio_flags_drop_only_the_side_they_control() {
-        let all: Vec<String> = ["app:cs2", "app:discord", "easyeffects_source", "default_output"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let all: Vec<String> = [
+            "app:cs2",
+            "app:discord",
+            "easyeffects_source",
+            "default_output",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
 
         // Both on is the default and drops nothing.
-        assert_eq!(filter_audio(all.clone(), true, true).len(), 4);
+        let roles = device_fixture();
+        assert_eq!(filter_audio(all.clone(), true, true, &roles), all);
         // Mic off still records the game and Discord.
         assert_eq!(
-            filter_audio(all.clone(), false, true),
+            filter_audio(all.clone(), false, true, &roles),
             vec!["app:cs2", "app:discord", "default_output"]
         );
         // Desktop off leaves the mic alone.
-        assert_eq!(filter_audio(all.clone(), true, false), vec!["easyeffects_source"]);
+        assert_eq!(
+            filter_audio(all.clone(), true, false, &roles),
+            vec!["easyeffects_source"]
+        );
         // Both off hands gsr no -a flag at all, which is silent video.
-        assert!(filter_audio(all, false, false).is_empty());
+        assert!(filter_audio(all, false, false, &roles).is_empty());
+    }
+
+    #[test]
+    fn mic_off_excludes_custom_and_unidentified_inputs_from_every_track() {
+        let all = [
+            "studio_mic",
+            "default_output",
+            "app:game|studio_mic",
+            "unclassified",
+        ]
+        .map(String::from)
+        .to_vec();
+        let tracks = with_mix_track(filter_audio(all, false, true, &device_fixture()));
+        assert_eq!(tracks, ["default_output", "app:game"]);
+    }
+
+    #[test]
+    fn mixed_and_individual_tracks_keep_only_the_enabled_role() {
+        let roles = device_fixture();
+        let all = [
+            "studio_mic",
+            "custom_input_return",
+            "headset.monitor|app:game",
+            "default_output",
+        ]
+        .map(String::from)
+        .to_vec();
+        let desktop = with_mix_track(filter_audio(all.clone(), false, true, &roles));
+        assert_eq!(
+            desktop,
+            [
+                "custom_input_return|default_output",
+                "custom_input_return",
+                "app:game",
+                "default_output"
+            ]
+        );
+        let mic = with_mix_track(filter_audio(all, true, false, &roles));
+        assert_eq!(
+            mic,
+            [
+                "studio_mic|headset.monitor",
+                "studio_mic",
+                "headset.monitor"
+            ]
+        );
+    }
+
+    #[test]
+    fn mic_off_keeps_documented_playback_selectors_not_prefixed_mics() {
+        let roles = device_fixture();
+        let tracks = [
+            "device:studio_mic",
+            "device:custom_input_return",
+            "app-inverse:game",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            with_mix_track(filter_audio(tracks, false, true, &roles)),
+            ["device:custom_input_return", "app-inverse:game"]
+        );
+    }
+
+    #[test]
+    fn removing_mic_from_a_compound_track_does_not_double_the_playback_mix() {
+        let roles = device_fixture();
+        let tracks = [
+            "default_output|studio_mic",
+            "default_output",
+            "custom_input_return",
+            "device:custom_input_return",
+        ]
+        .map(String::from)
+        .to_vec();
+        let mixed = with_mix_track(filter_audio(tracks, false, true, &roles));
+        assert_eq!(mixed[0], "default_output|custom_input_return");
+    }
+
+    #[test]
+    fn unknown_devices_cannot_bypass_switches_when_the_probe_fails() {
+        let roles = parse_device_roles(b"not JSON");
+        let tracks = ["unclassified", "default_output", "default_input"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            filter_audio(tracks.clone(), false, true, &roles),
+            ["default_output"]
+        );
+        assert_eq!(
+            filter_audio(tracks.clone(), true, false, &roles),
+            ["default_input"]
+        );
+        assert_eq!(filter_audio(tracks.clone(), true, true, &roles), tracks);
     }
 
     #[test]

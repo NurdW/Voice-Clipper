@@ -92,6 +92,13 @@ gpu-screen-recorder --list-audio-devices       # device names
 An app that is **not running** when the recorder starts still gets a track, a
 silent one, which keeps the track order stable between clips.
 
+The switches apply on the next recorder start, including to each component of a
+mixed track. For custom devices, `pactl --format=json list sources` must be able
+to identify the device as a capture input or playback monitor. If it can't,
+Clipper skips that device when either switch is off rather than guessing from
+its name. Mic-off excludes capture inputs; it can't remove your voice if another
+app has already routed it into the desktop sound.
+
 ---
 
 ## 4. How long a clip is
@@ -169,8 +176,11 @@ say it a little slower, or add the shorter version to phrases.txt.
 
 ## 6. Turning it off (privacy)
 
-Muting means: the mic keeps running but speech is ignored. Nothing is written
-to disk unless a phrase matches, and nothing ever leaves the PC.
+Listener mute keeps the mic pipe open but discards its audio instead of sending
+it to the speech recognizer. A partial phrase is cleared when mute takes effect.
+Unmuting opens a fresh capture stream, so the listener may take a moment to
+resume and does not process audio waiting in the old pipe. You can still save a
+clip manually.
 
 | Way | Command / action |
 |---|---|
@@ -179,9 +189,10 @@ to disk unless a phrase matches, and nothing ever leaves the PC.
 | Terminal | `clipctl mute` / `clipctl unmute` / `clipctl toggle` |
 | Stop it completely | `systemctl --user stop clipper` |
 
-`clipctl muted` prints which state you are in. Note that muting the *listener*
-does not stop the recorder — it keeps recording into RAM and simply ignores
-your voice. To stop recording entirely, click `stop GSR`.
+`clipctl muted` prints the listener state. Muting the *listener* does not stop
+recording your voice in the replay buffer. To exclude your mic from new
+recordings, turn off **microphone** in the GSR menu and make sure the recorder
+has restarted. This does not change previously saved clips.
 
 ---
 

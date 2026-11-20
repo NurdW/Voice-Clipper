@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The always-on listener: mic -> Vosk keyword spotting -> replay save.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -35,6 +36,49 @@ pub fn install_signal_handlers() {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ChunkAction {
+    Recognize,
+    Discard,
+    ReopenCapture,
+}
+
+struct MuteGate {
+    flag: PathBuf,
+    muted: bool,
+}
+
+impl MuteGate {
+    fn new(flag: PathBuf) -> Self {
+        let muted = flag.try_exists().unwrap_or(true);
+        if muted {
+            eprintln!("clipper: starting muted — ignoring speech");
+        }
+        Self { flag, muted }
+    }
+
+    fn chunk_action(&mut self, reset: impl FnOnce()) -> ChunkAction {
+        let state = self.flag.try_exists();
+        if matches!(state, Ok(false)) {
+            // The old pipe can hold multiple chunks captured while muted.
+            return if std::mem::take(&mut self.muted) {
+                ChunkAction::ReopenCapture
+            } else {
+                ChunkAction::Recognize
+            };
+        }
+        if !self.muted {
+            match state {
+                Err(e) => eprintln!("clipper: cannot read mute state: {e}; ignoring speech"),
+                _ => eprintln!("clipper: muted — ignoring speech (audio still being read)"),
+            }
+            reset();
+            self.muted = true;
+        }
+        ChunkAction::Discard
+    }
+}
+
 pub fn run() -> Result<()> {
     config::ensure_dirs()?;
     let phrases = load_phrases()?;
@@ -46,7 +90,10 @@ pub fn run() -> Result<()> {
         model.display()
     );
     let mut speech = Speech::new(&model, SAMPLE_RATE, &grammar)?;
-    eprintln!("clipper: listening. {} phrases armed. Ctrl-C to stop.", phrases.len());
+    eprintln!(
+        "clipper: listening. {} phrases armed. Ctrl-C to stop.",
+        phrases.len()
+    );
     for p in &phrases {
         eprintln!("  • {p}");
     }
@@ -55,13 +102,14 @@ pub fn run() -> Result<()> {
     let target = mic::target_from_env();
     eprintln!(
         "clipper: mic source: {}",
-        target.clone().unwrap_or_else(|| "system default input".to_string())
+        target
+            .clone()
+            .unwrap_or_else(|| "system default input".to_string())
     );
+    let mut mute = MuteGate::new(config::muted_flag()?);
     let mut mic = Mic::start(SAMPLE_RATE as u32, target.as_deref())?;
     let mut last_fire = Instant::now() - COOLDOWN;
-    let mut last_mute_check = Instant::now() - Duration::from_secs(1);
     let mut last_buffer_check = Instant::now() - ENSURE_INTERVAL;
-    let mut muted_logged = false;
 
     while !STOP.load(Ordering::SeqCst) {
         // gsr only records when something started it, and it can be killed by
@@ -82,24 +130,15 @@ pub fn run() -> Result<()> {
             continue;
         }
 
-        // Re-check the mute flag about once a second. Cheap stat, no IPC needed,
-        // and it means `clipctl mute` / the GUI / a hotkey all just work.
-        if last_mute_check.elapsed() >= Duration::from_millis(500) {
-            last_mute_check = Instant::now();
-            match state::is_muted() {
-                Ok(true) => {
-                    if !muted_logged {
-                        eprintln!("clipper: muted — ignoring speech (audio still being read)");
-                        muted_logged = true;
-                    }
-                    speech.reset();
-                    continue;
-                }
-                Ok(false) => muted_logged = false,
-                Err(e) => eprintln!("clipper: could not read mute state: {e}"),
+        match mute.chunk_action(|| speech.reset()) {
+            ChunkAction::Recognize => {}
+            ChunkAction::Discard => continue,
+            ChunkAction::ReopenCapture => {
+                drop(mic);
+                mic = Mic::start(SAMPLE_RATE as u32, target.as_deref())?;
+                continue;
             }
         }
-
         if !speech.accept(&buf) {
             continue;
         }
@@ -162,9 +201,185 @@ fn phrase_is_whole_utterance(text: &str, phrase: &str) -> bool {
     !p.is_empty() && t.len() == p.len() && t.iter().zip(&p).all(|(tw, pw)| *tw == *pw)
 }
 
+/// Save a clip from GPU Screen Recorder.
+fn save_clip() -> Result<()> {
+    crate::gsr::save()?;
+    eprintln!("clipper: gsr clip saved");
+    // The clip is already saved; a silent machine is a nuisance, not a failure.
+    if let Err(e) = crate::sound::play() {
+        eprintln!("clipper: could not play the clip sound: {e:#}");
+    }
+    Ok(())
+}
+
+/// Start GPU Screen Recorder if you asked to keep it alive and it is not
+/// running. There is no "up but idle" state to notice: gsr either records or it
+/// does not, so this is a plain start-if-absent.
+fn ensure_gsr_buffer() {
+    if !state::gsr_auto_enabled().unwrap_or(false) {
+        return;
+    }
+    if crate::gsr::pid().is_some() {
+        return;
+    }
+    match crate::gsr::start() {
+        Ok(pid) => eprintln!("clipper: started gpu-screen-recorder (pid {pid})"),
+        Err(e) => eprintln!("clipper: could not start gpu-screen-recorder: {e:#}"),
+    }
+}
+
+/// Run the SAME recognizer the listener uses over an audio file and print what
+/// it hears plus whether any of your phrases matched.
+///
+/// This exists because "does it understand my voice?" is otherwise impossible
+/// to test without standing at your mic saying the same sentence over and over.
+/// Decode is delegated to ffmpeg so any format you throw at it works.
+pub fn hear(path: &str) -> Result<()> {
+    use std::process::{Command as StdCommand, Stdio};
+
+    config::ensure_dirs()?;
+    let phrases = load_phrases()?;
+    let model = config::find_model()?;
+    let mut speech = Speech::new(&model, SAMPLE_RATE, &build_grammar(&phrases))?;
+
+    let mut child = StdCommand::new("ffmpeg")
+        .args([
+            "-v", "error", "-i", path, "-f", "s16le", "-ac", "1", "-ar", "16000", "pipe:1",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            anyhow::anyhow!("could not run ffmpeg (install it, or feed a 16 kHz mono WAV): {e}")
+        })?;
+    let mut stdout = child.stdout.take().expect("ffmpeg stdout pipe");
+
+    let mut buf = vec![0i16; CHUNK_SAMPLES];
+    let mut heard_any = false;
+    let mut matched: Vec<String> = Vec::new();
+
+    loop {
+        let bytes = {
+            use std::io::Read;
+            let slice = unsafe {
+                std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len() * 2)
+            };
+            match stdout.read(slice) {
+                Ok(n) if n > 0 => n / 2,
+                _ => break,
+            }
+        };
+        if speech.accept(&buf[..bytes]) {
+            let text = result_text(&speech.result());
+            if text.is_empty() {
+                continue;
+            }
+            heard_any = true;
+            let hit = phrases.iter().find(|p| phrase_is_whole_utterance(&text, p));
+            println!(
+                "heard: {text}{}",
+                hit.map(|h| format!("   → MATCH \"{h}\""))
+                    .unwrap_or_default()
+            );
+            if let Some(h) = hit {
+                matched.push(h.clone());
+            }
+        }
+    }
+
+    // Flush whatever is still in the recognizer at the end of the file.
+    let tail = result_text(&speech.final_result());
+    if !tail.is_empty() {
+        heard_any = true;
+        let hit = phrases.iter().find(|p| phrase_is_whole_utterance(&tail, p));
+        println!(
+            "heard: {tail}{}",
+            hit.map(|h| format!("   → MATCH \"{h}\""))
+                .unwrap_or_default()
+        );
+        if let Some(h) = hit {
+            matched.push(h.clone());
+        }
+    }
+
+    let _ = child.wait();
+    if !heard_any {
+        println!("nothing recognised — is there speech in {path}?");
+    } else if matched.is_empty() {
+        println!("no phrase matched. Your phrases: {}", phrases.join(" | "));
+    } else {
+        println!(
+            "{} phrase(s) matched — a live clip would have fired.",
+            matched.len()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::phrase_is_whole_utterance as whole;
+    use super::{ChunkAction, MuteGate, phrase_is_whole_utterance as whole};
+
+    #[test]
+    fn muted_chunks_never_reach_recognition_and_unmute_starts_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let flag = dir.path().join("muted");
+        let mut gate = MuteGate::new(flag.clone());
+        let mut resets = 0;
+        let mut accepted = Vec::new();
+        // Read 5 can straddle unmute: it started when the flag was still set.
+        for (sample, muted) in [
+            (1, false),
+            (2, true),
+            (3, true),
+            (4, true),
+            (5, false),
+            (6, false),
+        ] {
+            if muted {
+                std::fs::write(&flag, b"").unwrap();
+            } else if flag.exists() {
+                std::fs::remove_file(&flag).unwrap();
+            }
+            if gate.chunk_action(|| resets += 1) == ChunkAction::Recognize {
+                accepted.push(sample);
+            }
+        }
+        assert_eq!(accepted, [1, 6]);
+        assert_eq!(resets, 1);
+    }
+
+    #[test]
+    fn unmute_reopens_capture_instead_of_processing_the_queued_backlog() {
+        use std::collections::VecDeque;
+
+        let dir = tempfile::tempdir().unwrap();
+        let flag = dir.path().join("muted");
+        std::fs::write(&flag, b"").unwrap();
+        let mut gate = MuteGate::new(flag.clone());
+        let mut pipe = VecDeque::from([10, 20, 30]);
+        std::fs::remove_file(flag).unwrap();
+
+        let mut accepted = Vec::new();
+        while let Some(chunk) = pipe.pop_front() {
+            match gate.chunk_action(|| {}) {
+                ChunkAction::Recognize => accepted.push(chunk),
+                ChunkAction::Discard => {}
+                ChunkAction::ReopenCapture => pipe = VecDeque::from([40]),
+            }
+        }
+        assert_eq!(accepted, [40]);
+    }
+
+    #[test]
+    fn unreadable_mute_state_does_not_enable_recognition() {
+        let dir = tempfile::tempdir().unwrap();
+        let flag = dir.path().join("muted");
+        std::os::unix::fs::symlink(&flag, &flag).unwrap();
+        assert!(flag.try_exists().is_err());
+        let mut gate = MuteGate::new(flag);
+        assert_eq!(gate.chunk_action(|| {}), ChunkAction::Discard);
+    }
 
     #[test]
     fn the_phrase_must_be_the_whole_utterance() {
@@ -225,104 +440,4 @@ mod tests {
         assert!(!whole("go reddit now", "reddit"));
         assert!(!whole("[unk]", "reddit"));
     }
-}
-
-/// Save a clip from GPU Screen Recorder.
-fn save_clip() -> Result<()> {
-    crate::gsr::save()?;
-    eprintln!("clipper: gsr clip saved");
-    // The clip is already saved; a silent machine is a nuisance, not a failure.
-    if let Err(e) = crate::sound::play() {
-        eprintln!("clipper: could not play the clip sound: {e:#}");
-    }
-    Ok(())
-}
-
-/// Start GPU Screen Recorder if you asked to keep it alive and it is not
-/// running. There is no "up but idle" state to notice: gsr either records or it
-/// does not, so this is a plain start-if-absent.
-fn ensure_gsr_buffer() {
-    if !state::gsr_auto_enabled().unwrap_or(false) {
-        return;
-    }
-    if crate::gsr::pid().is_some() {
-        return;
-    }
-    match crate::gsr::start() {
-        Ok(pid) => eprintln!("clipper: started gpu-screen-recorder (pid {pid})"),
-        Err(e) => eprintln!("clipper: could not start gpu-screen-recorder: {e:#}"),
-    }
-}
-
-/// Run the SAME recognizer the listener uses over an audio file and print what
-/// it hears plus whether any of your phrases matched.
-///
-/// This exists because "does it understand my voice?" is otherwise impossible
-/// to test without standing at your mic saying the same sentence over and over.
-/// Decode is delegated to ffmpeg so any format you throw at it works.
-pub fn hear(path: &str) -> Result<()> {
-    use std::process::{Command as StdCommand, Stdio};
-
-    config::ensure_dirs()?;
-    let phrases = load_phrases()?;
-    let model = config::find_model()?;
-    let mut speech = Speech::new(&model, SAMPLE_RATE, &build_grammar(&phrases))?;
-
-    let mut child = StdCommand::new("ffmpeg")
-        .args(["-v", "error", "-i", path, "-f", "s16le", "-ac", "1", "-ar", "16000", "pipe:1"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("could not run ffmpeg (install it, or feed a 16 kHz mono WAV): {e}"))?
-        ;
-    let mut stdout = child.stdout.take().expect("ffmpeg stdout pipe");
-
-    let mut buf = vec![0i16; CHUNK_SAMPLES];
-    let mut heard_any = false;
-    let mut matched: Vec<String> = Vec::new();
-
-    loop {
-        let bytes = {
-            use std::io::Read;
-            let slice =
-                unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len() * 2) };
-            match stdout.read(slice) {
-                Ok(n) if n > 0 => n / 2,
-                _ => break,
-            }
-        };
-        if speech.accept(&buf[..bytes]) {
-            let text = result_text(&speech.result());
-            if text.is_empty() {
-                continue;
-            }
-            heard_any = true;
-            let hit = phrases.iter().find(|p| phrase_is_whole_utterance(&text, p));
-            println!("heard: {text}{}", hit.map(|h| format!("   → MATCH \"{h}\"")).unwrap_or_default());
-            if let Some(h) = hit {
-                matched.push(h.clone());
-            }
-        }
-    }
-
-    // Flush whatever is still in the recognizer at the end of the file.
-    let tail = result_text(&speech.final_result());
-    if !tail.is_empty() {
-        heard_any = true;
-        let hit = phrases.iter().find(|p| phrase_is_whole_utterance(&tail, p));
-        println!("heard: {tail}{}", hit.map(|h| format!("   → MATCH \"{h}\"")).unwrap_or_default());
-        if let Some(h) = hit {
-            matched.push(h.clone());
-        }
-    }
-
-    let _ = child.wait();
-    if !heard_any {
-        println!("nothing recognised — is there speech in {path}?");
-    } else if matched.is_empty() {
-        println!("no phrase matched. Your phrases: {}", phrases.join(" | "));
-    } else {
-        println!("{} phrase(s) matched — a live clip would have fired.", matched.len());
-    }
-    Ok(())
 }

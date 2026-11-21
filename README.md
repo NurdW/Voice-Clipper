@@ -62,7 +62,10 @@ multitrack result OBS is used for, at a fraction of the capture overhead.
 
 Environment overrides, all optional: `CLIPPER_GSR_DIR`, `CLIPPER_GSR_SECONDS`,
 `CLIPPER_GSR_AUDIO`, `CLIPPER_GSR_BITRATE`, `CLIPPER_GSR_FPS`,
-`CLIPPER_GSR_MONITOR`, `VOICE_CLIPPER_POS`.
+`CLIPPER_GSR_MONITOR`, `VOICE_CLIPPER_POS`, `CLIPPER_MIC` (force one microphone),
+`CLIPPER_AUDIO_WAIT` (seconds to wait for a named audio device before recording
+without it, default 30), `CLIPPER_DEBUG_JSON=1` (log Vosk's raw JSON, for when the
+recogniser's output is the mystery).
 
 ## Build and test
 
@@ -163,9 +166,20 @@ each socket with `--list-monitors` instead of trusting an environment value.
 so an app only gets the gate and noise suppression if it names that node.
 `gsr::mic_source()` checks whether the node exists and uses it, falling back to
 `default_input` when EasyEffects is not running — naming a node that is absent
-records no microphone at all. The clipper's own `pw-record` deliberately listens
-on the raw mic: a noise gate can swallow quiet speech, and a swallowed phrase is
-a missed clip.
+records no microphone at all. The clipper's own `pw-record` follows the same
+rule, and re-checks every 30s, so whichever of the two wins the login race no
+longer decides what Vosk hears all day.
+
+It did not used to. Listening on the raw mic was deliberate, because a noise gate
+can swallow quiet speech and a swallowed phrase is a missed clip. That trade was
+reversed by evidence: two clips fired on a clean `chat clip that` while the
+recorded mic track was digital silence for all 181 seconds, and whisper.cpp
+could not transcribe a word of the mic or find anything resembling the phrase in
+the show that was playing. A quiet room at −45 dBFS reaches the recogniser just
+fine, and a grammar restricted to three phrases will spend whatever it hears on
+one of them. Putting your own gate in front of Vosk is the only energy floor it
+has. The cost is the one originally feared: speak very softly and the gate may eat
+the trigger. `CLIPPER_MIC=alsa_input.<your-device>` puts the raw mic back.
 
 **Process discovery must read `/proc/*/cmdline`, not `/proc/*/comm`.** `comm` is
 truncated to 15 characters, so `gpu-screen-recorder` appears as

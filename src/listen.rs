@@ -52,15 +52,13 @@ pub fn run() -> Result<()> {
     }
 
     let mut buf = vec![0i16; CHUNK_SAMPLES];
-    let target = mic::target_from_env();
-    eprintln!(
-        "clipper: mic source: {}",
-        target.clone().unwrap_or_else(|| "system default input".to_string())
-    );
+    let mut target = mic::listen_target();
+    eprintln!("clipper: mic source: {}", mic_label(&target));
     let mut mic = Mic::start(SAMPLE_RATE as u32, target.as_deref())?;
     let mut last_fire = Instant::now() - COOLDOWN;
     let mut last_mute_check = Instant::now() - Duration::from_secs(1);
     let mut last_buffer_check = Instant::now() - ENSURE_INTERVAL;
+    let mut last_mic_check = Instant::now() - ENSURE_INTERVAL;
     let mut muted_logged = false;
 
     while !STOP.load(Ordering::SeqCst) {
@@ -70,6 +68,28 @@ pub fn run() -> Result<()> {
         if last_buffer_check.elapsed() >= ENSURE_INTERVAL {
             last_buffer_check = Instant::now();
             ensure_gsr_buffer();
+        }
+
+        // Whoever wins the login race decides what Vosk hears for the whole
+        // session unless we look again: EasyEffects publishes its filtered mic a
+        // few seconds after the session starts, and on the days it lost that
+        // race the listener ran on the raw mic all day. Re-resolving also means a
+        // crash degrades the input to the raw mic instead of going deaf, because
+        // the fallback is resolved before pw-record is ever started.
+        if last_mic_check.elapsed() >= ENSURE_INTERVAL {
+            last_mic_check = Instant::now();
+            let want = mic::listen_target();
+            if want != target {
+                eprintln!("clipper: mic source changing to {}", mic_label(&want));
+                match Mic::start(SAMPLE_RATE as u32, want.as_deref()) {
+                    Ok(m) => {
+                        target = want;
+                        mic = m;
+                        speech.reset();
+                    }
+                    Err(e) => eprintln!("clipper: could not switch mic: {e}"),
+                }
+            }
         }
 
         if let Err(e) = mic.read(&mut buf) {
@@ -139,6 +159,14 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// Human name for the log: the node we named, or the system default if we named
+/// nothing (only possible when `CLIPPER_MIC` is set to something odd).
+fn mic_label(target: &Option<String>) -> String {
+    target
+        .clone()
+        .unwrap_or_else(|| "system default input".to_string())
+}
+
 /// True when `text` is the phrase and nothing else: same words, same order, no
 /// extra words on either side.
 ///
@@ -160,71 +188,6 @@ fn phrase_is_whole_utterance(text: &str, phrase: &str) -> bool {
     let t: Vec<&str> = text.split_whitespace().collect();
     let p: Vec<&str> = phrase.split_whitespace().collect();
     !p.is_empty() && t.len() == p.len() && t.iter().zip(&p).all(|(tw, pw)| *tw == *pw)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::phrase_is_whole_utterance as whole;
-
-    #[test]
-    fn the_phrase_must_be_the_whole_utterance() {
-        assert!(whole("chat clip that", "chat clip that"));
-        // A real journal line that saved a clip nobody asked for: the words were
-        // all there, with noise on both sides of them.
-        assert!(!whole("[unk] [unk] chat clip that [unk]", "chat clip that"));
-        assert!(!whole("alright chat clip that", "chat clip that"));
-        assert!(!whole("chat clip that now", "chat clip that"));
-        assert!(!whole("clip", "chat clip that"));
-        assert!(!whole("", "chat clip that"));
-    }
-
-    #[test]
-    fn matches_whole_word_runs_only() {
-        assert!(whole("clip that", "clip that"));
-        assert!(!whole("clip", "clip that"));
-        assert!(!whole("that clip", "clip that"));
-        assert!(!whole("", "clip that"));
-    }
-
-    #[test]
-    fn multiword_phrase_needs_all_words_in_order() {
-        assert!(whole("hey jarvis clip that", "hey jarvis clip that"));
-        assert!(!whole("jarvis hey clip that", "hey jarvis clip that"));
-    }
-
-    #[test]
-    fn no_wildcard_is_tolerated() {
-        // Every word must be heard. These are real journal lines that used to
-        // save clips with a word missing.
-        assert!(whole("chat clip that", "chat clip that"));
-        assert!(!whole("[unk] clip that", "chat clip that"));
-        assert!(!whole("chat clip [unk]", "chat clip that"));
-        assert!(!whole("chat did you [unk] that", "chat did you see that"));
-        assert!(!whole("chat take [unk]", "chat take notes"));
-        assert!(!whole("[unk] [unk] take notes [unk]", "chat take notes"));
-    }
-
-    #[test]
-    fn a_missing_wake_word_does_not_fire() {
-        // No [unk] at all means nothing was heard in the wake-word position, so
-        // the bare phrase must not trigger — that is what the wake word is for.
-        assert!(!whole("clip that", "chat clip that"));
-        assert!(!whole("take notes", "chat take notes"));
-    }
-
-    #[test]
-    fn all_unk_is_not_a_match() {
-        // Otherwise every burst of background noise would match every phrase.
-        assert!(!whole("[unk] [unk] [unk]", "chat clip that"));
-        assert!(!whole("[unk] [unk] [unk] [unk]", "chat did you see that"));
-    }
-
-    #[test]
-    fn single_word_phrases_need_an_exact_word() {
-        assert!(whole("reddit", "reddit"));
-        assert!(!whole("go reddit now", "reddit"));
-        assert!(!whole("[unk]", "reddit"));
-    }
 }
 
 /// Save a clip from GPU Screen Recorder.
@@ -325,4 +288,69 @@ pub fn hear(path: &str) -> Result<()> {
         println!("{} phrase(s) matched — a live clip would have fired.", matched.len());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::phrase_is_whole_utterance as whole;
+
+    #[test]
+    fn the_phrase_must_be_the_whole_utterance() {
+        assert!(whole("chat clip that", "chat clip that"));
+        // A real journal line that saved a clip nobody asked for: the words were
+        // all there, with noise on both sides of them.
+        assert!(!whole("[unk] [unk] chat clip that [unk]", "chat clip that"));
+        assert!(!whole("alright chat clip that", "chat clip that"));
+        assert!(!whole("chat clip that now", "chat clip that"));
+        assert!(!whole("clip", "chat clip that"));
+        assert!(!whole("", "chat clip that"));
+    }
+
+    #[test]
+    fn matches_whole_word_runs_only() {
+        assert!(whole("clip that", "clip that"));
+        assert!(!whole("clip", "clip that"));
+        assert!(!whole("that clip", "clip that"));
+        assert!(!whole("", "clip that"));
+    }
+
+    #[test]
+    fn multiword_phrase_needs_all_words_in_order() {
+        assert!(whole("hey jarvis clip that", "hey jarvis clip that"));
+        assert!(!whole("jarvis hey clip that", "hey jarvis clip that"));
+    }
+
+    #[test]
+    fn no_wildcard_is_tolerated() {
+        // Every word must be heard. These are real journal lines that used to
+        // save clips with a word missing.
+        assert!(whole("chat clip that", "chat clip that"));
+        assert!(!whole("[unk] clip that", "chat clip that"));
+        assert!(!whole("chat clip [unk]", "chat clip that"));
+        assert!(!whole("chat did you [unk] that", "chat did you see that"));
+        assert!(!whole("chat take [unk]", "chat take notes"));
+        assert!(!whole("[unk] [unk] take notes [unk]", "chat take notes"));
+    }
+
+    #[test]
+    fn a_missing_wake_word_does_not_fire() {
+        // No [unk] at all means nothing was heard in the wake-word position, so
+        // the bare phrase must not trigger — that is what the wake word is for.
+        assert!(!whole("clip that", "chat clip that"));
+        assert!(!whole("take notes", "chat take notes"));
+    }
+
+    #[test]
+    fn all_unk_is_not_a_match() {
+        // Otherwise every burst of background noise would match every phrase.
+        assert!(!whole("[unk] [unk] [unk]", "chat clip that"));
+        assert!(!whole("[unk] [unk] [unk] [unk]", "chat did you see that"));
+    }
+
+    #[test]
+    fn single_word_phrases_need_an_exact_word() {
+        assert!(whole("reddit", "reddit"));
+        assert!(!whole("go reddit now", "reddit"));
+        assert!(!whole("[unk]", "reddit"));
+    }
 }

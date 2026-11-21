@@ -13,6 +13,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -92,6 +94,73 @@ fn parse_audio_list(txt: &str) -> Vec<String> {
         .collect()
 }
 
+/// Configured sources, before anything is checked against the live system.
+fn configured_list() -> Vec<String> {
+    if let Ok(v) = env::var("CLIPPER_GSR_AUDIO") {
+        return v
+            .split('|')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    if let Ok(path) = crate::config::gsr_audio_file()
+        && let Ok(txt) = fs::read_to_string(path)
+    {
+        let v = parse_audio_list(&txt);
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    default_audio()
+}
+
+/// Sources that name a *device* rather than an application.
+///
+/// gsr tolerates a missing app (it makes a silent track) but a missing device is
+/// fatal, so `filter_available` drops those. Correct in general, wrong at login:
+/// EasyEffects publishes `easyeffects_source` a few seconds after the session
+/// starts, so the first GSR of the day silently recorded the raw mic — whine and
+/// all — and nothing re-read the list afterwards.
+fn device_sources(list: &[String]) -> Vec<String> {
+    list.iter()
+        .filter(|s| !s.starts_with("app:") && *s != "default_output" && *s != "default_input")
+        .cloned()
+        .collect()
+}
+
+/// Give virtual audio devices a moment to exist before recording without them.
+///
+/// Returns immediately when everything configured is already present, so a normal
+/// start costs nothing. `CLIPPER_AUDIO_WAIT` caps the wait in seconds (default
+/// 30); after that we record with whatever is there, exactly as before. A probe
+/// that returns nothing at all is treated as "cannot tell" and does not block.
+fn await_device_sources(list: &[String]) {
+    let want = device_sources(list);
+    if want.is_empty() {
+        return;
+    }
+    let secs = env::var("CLIPPER_AUDIO_WAIT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30);
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let known = known_audio_devices();
+        if known.is_empty() || want.iter().all(|w| known.iter().any(|k| k == w)) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            eprintln!(
+                "clipper: no {} after {secs}s; recording without it",
+                want.join(", ")
+            );
+            return;
+        }
+        eprintln!("clipper: waiting for audio source {} …", want.join(", "));
+        thread::sleep(Duration::from_secs(2));
+    }
+}
+
 /// Is this source the microphone (as opposed to game and app sound)?
 ///
 /// `easyeffects_source` is a virtual device with no "input" in its name, so it
@@ -163,22 +232,11 @@ pub fn with_mix_track(list: Vec<String>) -> Vec<String> {
 /// The list is read from `~/.config/clipper/gsr_audio.txt`, one source per
 /// line, `#` for comments. `CLIPPER_GSR_AUDIO` still wins for a one-off.
 pub fn audio_list() -> Vec<String> {
-    let list = if let Ok(v) = env::var("CLIPPER_GSR_AUDIO") {
-        v.split('|')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    } else if let Ok(path) = crate::config::gsr_audio_file()
-        && let Ok(txt) = fs::read_to_string(path)
-    {
-        let v = parse_audio_list(&txt);
-        if v.is_empty() {
-            default_audio()
-        } else {
-            filter_available(v)
-        }
-    } else {
+    let configured = configured_list();
+    let list = if configured.is_empty() {
         default_audio()
+    } else {
+        filter_available(configured)
     };
     with_mix_track(apply_audio_flags(list))
 }
@@ -282,7 +340,7 @@ pub fn output_dir() -> PathBuf {
 /// The node only exists while EasyEffects is running, so this is a live check
 /// rather than a config flag — it also covers the race where GSR is started
 /// before EasyEffects has finished logging in.
-fn easyeffects_source_present() -> bool {
+pub(crate) fn easyeffects_source_present() -> bool {
     Command::new("pactl")
         .args(["list", "short", "sources"])
         .output()
@@ -389,6 +447,8 @@ pub fn start() -> Result<u32> {
     let seconds = seconds().to_string();
     let bitrate = bitrate_kbps().to_string();
     let fps = fps().to_string();
+    // EasyEffects' virtual mic usually does not exist yet when the session starts.
+    await_device_sources(&configured_list());
     let audio = audio_list();
     let mut cmd = Command::new(BIN);
     cmd.args(["-w", &monitor])
@@ -557,5 +617,21 @@ mod tests {
         // A "mix" of one source would just duplicate it as a second track.
         let one = vec!["default_output".to_string()];
         assert_eq!(with_mix_track(one.clone()), one);
+    }
+
+    #[test]
+    fn only_named_devices_are_waited_for() {
+        let list = vec![
+            "easyeffects_source".to_string(),
+            "app:cs2".to_string(),
+            "default_output".to_string(),
+            "default_input".to_string(),
+        ];
+        // A missing app just makes a silent track and the PipeWire defaults
+        // always exist, so waiting on those would stall every start for nothing.
+        assert_eq!(device_sources(&list), vec!["easyeffects_source"]);
+        assert!(
+            device_sources(&["app:cs2".to_string(), "default_output".to_string()]).is_empty()
+        );
     }
 }

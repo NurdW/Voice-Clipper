@@ -26,6 +26,32 @@ pub fn target_from_env() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Which node the listener should capture, right now.
+pub fn listen_target() -> Option<String> {
+    choose_target(target_from_env(), crate::gsr::easyeffects_source_present())
+}
+
+/// The rule, split out so it can be tested without a live PipeWire.
+///
+/// `CLIPPER_MIC` wins outright: it is the escape hatch, and the way to put the
+/// raw mic back in one line. Otherwise prefer EasyEffects' filtered mic. Its gate
+/// drops everything below about -45 dBFS, and the listener has no energy floor of
+/// its own, so speaker bleed quiet enough that whisper.cpp returns `[INAUDIBLE]`
+/// was being forced by the restricted grammar into a real-looking phrase.
+///
+/// When EasyEffects is not there, name `default_input` rather than passing no
+/// target at all: pw-record fails outright on a node that does not exist, so the
+/// fallback has to be resolved before we start it. EasyEffects is a systemd unit
+/// with `Restart=always`, so "not there" is a few seconds at login or after a
+/// crash, and the listener re-resolves every 30s and moves back on its own.
+fn choose_target(override_: Option<String>, easyeffects_present: bool) -> Option<String> {
+    if let Some(v) = override_ {
+        return Some(v);
+    }
+    let name = if easyeffects_present { "easyeffects_source" } else { "default_input" };
+    Some(name.to_string())
+}
+
 /// Record for `secs` seconds and report a robust loudness figure: the 99.5th
 /// percentile of |sample| (0..32767).
 ///
@@ -126,5 +152,30 @@ impl Drop for Mic {
         // Never leave an orphaned recorder holding the mic.
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::choose_target;
+
+    #[test]
+    fn the_filtered_mic_is_preferred_when_it_exists() {
+        assert_eq!(choose_target(None, true).as_deref(), Some("easyeffects_source"));
+    }
+
+    #[test]
+    fn it_falls_back_to_the_named_default_until_easyeffects_returns() {
+        // Named, not "no target": pw-record cannot be pointed at a node that is
+        // not there, so the fallback has to be decided up front.
+        assert_eq!(choose_target(None, false).as_deref(), Some("default_input"));
+    }
+
+    #[test]
+    fn an_explicit_mic_beats_the_filtered_one() {
+        // This is how you put the raw mic back without touching the code.
+        let raw = Some("alsa_input.pci-0000_09_00.4.analog-stereo".to_string());
+        assert_eq!(choose_target(raw.clone(), true), raw);
+        assert_eq!(choose_target(raw.clone(), false), raw);
     }
 }
